@@ -216,3 +216,42 @@ hive start worker-1 && hive send worker-1 "write ok.txt containing OK"
                                      # boots without a dialog, and does work
 # then audit the transcript: no tool outside the role's allow list
 ```
+
+## CI
+
+`.github/workflows/tests.yml` runs the suites on **ubuntu-latest and windows-latest, node 22
+and 24**, with `fail-fast: false` so one platform's failure cannot hide the other's.
+
+The matrix is not decoration. Two boundary bugs in this project were visible on one OS only:
+case-folding let `/Room/x` past a `/room` guard on case-sensitive Linux, and a Windows-style
+`C:/…` path is not absolute on Linux, so an escape attempt resolved *inside* the room. A
+single-platform CI would have shipped both.
+
+CI runs no agent and spends nothing — the suites unit-test the boundary logic, budget decision
+table, egress matcher and config parser. No binaries, no network, no credentials.
+
+Beyond the suites it asserts:
+
+- `node:sqlite` is available (the control plane needs it; Node 22+)
+- symlink capability is probed and printed, so a skip is never a surprise
+- the shipped `hive.yaml` parses to the values it appears to declare — including that no
+  allowlist entry parsed as a map, the inline-comment bug from `POSTMORTEMS.md`
+- both role templates are valid JSON with a deny list
+- the file-only role denies all 10 known execution paths and allows none — the regression test
+  for the `ToolSearch` → `Monitor` bypass
+- `node --check` on every source file, and no doc reference points at a consolidated file
+
+**A skipped case fails the build.** `test/all.js` asserts an expected count per suite, because
+the scope-guard suite skips its four symlink cases when the platform cannot create symlinks —
+it would report "25 passed, 0 failed" and exit 0, going green with the symlink boundary
+untested. That is this project's recurring failure mode (`POSTMORTEMS.md`), so it is now a
+loud failure with the reason named.
+
+Measured on the runners: both Ubuntu and Windows runners **can** create junctions and file
+symlinks, so all 91 cases genuinely run on every combination. Windows file symlinks normally
+need Developer Mode or elevation, so do not assume this of other CI providers or a local
+Windows checkout — the count assertion is what tells you.
+
+```bash
+node test/all.js     # what CI runs; run it on both platforms before trusting a change
+```
