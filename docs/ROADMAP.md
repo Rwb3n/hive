@@ -8,6 +8,14 @@ Nothing here is speculative feature-listing: every item is either a gap the code
 
 ---
 
+## Shipped since this list was written
+
+- **Goals** — one hierarchy level above a task, with rollups. A durable intent with a budget
+  that follows the work, surviving `hive reset`. Portfolio and programme deliberately skipped:
+  single operator, and they would be nouns without questions. `hive goals`, `CONFIG.md`.
+
+---
+
 ## Now — the pipeline has a manual seam
 
 ### 1. Artifact hand-off between tasks
@@ -50,7 +58,8 @@ Needs #1, plus a `reply_to` on a task so a result can be routed back to its orig
 round counter so a bad loop terminates.
 
 **Cost.** Small once #1 exists. The interesting part is not the plumbing but the stopping rule:
-how many rounds, and who decides "good enough".
+how many rounds, and who decides "good enough". A goal's `notes` field is the natural place to
+record what each round concluded.
 
 ### 3. Make `(doc only)` config real — or delete it
 
@@ -90,7 +99,17 @@ The two worth building:
 failure modes (conflicts, dirty trees) are where the work actually is. `readingroom` is a day,
 mostly in the guard and its tests.
 
-### 5. Retry and failure policy
+### 5. Goal priority in claim order
+
+**Today.** `goals.priority` is stored, reported, and **not yet consulted**. `claimNextTask` takes
+the oldest queued task regardless of which goal it serves, so priority is currently documentation.
+
+**Done means** claim order is `ORDER BY goal priority, task id`, so a priority-1 goal's work is
+delivered before a priority-5 goal's older task. Needs a join in one query.
+
+**Cost.** An hour, plus tests that a starved low-priority goal still eventually runs.
+
+### 6. Retry and failure policy
 
 **Today.** `tasks.attempts` is incremented and never consulted. A failed task stays failed. A
 boot failure returns the task to the queue (good) but a *task* failure does not.
@@ -101,7 +120,7 @@ actually sees.
 
 **Cost.** A day. Mostly deciding the taxonomy, not writing it.
 
-### 6. The unused `messages` table
+### 7. The unused `messages` table
 
 **Today.** The schema has `messages` with a delivery flag and nothing uses it. It was built for
 "agent-to-agent notes that are not tasks" and that need never materialised, because results
@@ -116,7 +135,7 @@ mid-task without failing) or drop the table. Dead schema is a trap for the next 
 
 ## Later — real but not yet earned
 
-### 7. Multi-machine
+### 8. Multi-machine
 
 `ARCHITECTURE.md` already puts an HTTP seam in the right place for it, and `CLI-NOTES.md` notes
 `claude gateway --config` exists as a possible aggregation point. Needs per-agent tokens (today
@@ -125,22 +144,27 @@ second host.
 
 **Cost.** A week, and it buys nothing until one machine is genuinely the constraint.
 
-### 8. Egress: containing the allowlisted host
+### 9. Egress: containing the allowlisted host
 
 `SECURITY.md` states the limit plainly: an agent can reach `api.anthropic.com` and could encode
 data into requests there. Containing that means a proxy that inspects and rewrites API traffic —
 a different project, and one with its own failure modes.
 
-### 9. Web view over the event log
+### 10. Web view over the event log
 
-Everything needed is already recorded: `events`, `denials`, `agent_costs`, task trees with
-`parent_id`. A read-only page over the DB would make a run legible at a glance in a way `hive ps`
+Everything needed is already recorded: `events`, `denials`, `agent_costs`, goals with their
+rollups, task trees with `parent_id`. A read-only page over the DB would make a run legible at a glance in a way `hive ps`
 cannot. Pure convenience — worth doing only once the pipeline above is closed.
 
 ---
 
 ## Deliberately not planned
 
+- **Portfolio and programme levels.** A single operator does not have competing programmes
+  bidding for a quarterly budget. `tag` plus the goal rollup covers grouping; if real hierarchy
+  is ever needed, goals are the thing it would nest over and nothing beneath has to change.
+- **Dates, milestones, Gantt.** Agents have queues, not calendars. A goal with a budget and a
+  priority is useful; a goal with a schedule is a different product.
 - **More roles.** `manager` and `boss` exist in the authority table and are ceremony until they
   have something to decide a planner cannot. Adding org-chart depth costs tokens and latency and
   buys nothing; parallelism at the leaves is where the value is.

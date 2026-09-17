@@ -81,6 +81,27 @@ const route = (method, pattern, handler) => {
 // --- health / meta
 route('GET', '/health', () => ({ ok: true, db: DB_PATH, home: HIVE_HOME }));
 
+// --- goals: the one level above a task. An intent that outlives a session.
+route('GET', '/goals', (p, body, q) => db.listGoals(D, q).map((g) => db.goalRollup(D, g.id)));
+route('POST', '/goals', (p, body) => {
+  if (!body.title) return { _status: 400, error: 'missing field: title' };
+  const g = db.createGoal(D, body);
+  db.addEvent(D, { evt: 'goal.created', payload: { id: g.id, title: g.title, budget_usd: g.budget_usd } });
+  return db.goalRollup(D, g.id);
+});
+route('GET', '/goals/:id', (p) => {
+  const r = db.goalRollup(D, p.id);
+  if (!r) return { _status: 404, error: 'no such goal' };
+  return r;
+});
+route('PATCH', '/goals/:id', (p, body) => {
+  if (!db.getGoal(D, p.id)) return { _status: 404, error: 'no such goal' };
+  db.updateGoal(D, p.id, body);
+  db.addEvent(D, { evt: 'goal.updated', payload: { id: p.id, ...body } });
+  return db.goalRollup(D, p.id);
+});
+route('GET', '/goals/:id/tasks', (p) => db.listTasks(D, { goal_id: p.id }));
+
 // --- agents
 route('GET', '/agents', () => db.listAgents(D));
 route('GET', '/agents/:name', (p) => {
@@ -187,6 +208,18 @@ route('POST', '/agents/:name/claim', (p) => {
 
   const t = db.claimNextTask(D, p.name);
   if (!t) return { _status: 204, empty: true };
+
+  // A goal's budget and status gate delivery too: a cap that follows the WORK rather
+  // than the worker. A paused or exhausted goal hands its task back to the queue so it
+  // is not lost, and the agent stays free for work under other goals.
+  if (t.goal_id) {
+    const gv = db.goalOverBudget(D, t.goal_id);
+    if (gv) {
+      db.updateTask(D, t.id, { status: 'queued' });
+      db.addEvent(D, { agent: p.name, task_id: t.id, evt: 'goal.blocked', payload: gv });
+      return { _status: 402, error: gv.reason, goal: db.goalRollup(D, t.goal_id) };
+    }
+  }
   return t;
 });
 

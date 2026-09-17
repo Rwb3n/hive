@@ -16,9 +16,36 @@ function open(dbPath) {
   db.exec('PRAGMA busy_timeout = 5000');
   db.exec('PRAGMA synchronous = NORMAL');
 
+  // Migrate BEFORE applying the schema: schema.sql creates an index on tasks(goal_id),
+  // and on a pre-goals database that statement fails with "no such column" before any
+  // migration inside it could run.
+  migrate(db);
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schema);
   return db;
+}
+
+// `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so a new
+// column never reaches an existing database — the server then dies on first query with
+// "no such column". Additive migrations, each idempotent, applied on every open.
+//
+// Keep them append-only and never destructive: a hive's DB holds goals that are meant to
+// outlive everything else in the system.
+function migrate(db) {
+  const ADDITIONS = [
+    ['tasks', 'goal_id', 'TEXT'],
+    ['tasks', 'updated_at', 'TEXT'],
+  ];
+  for (const [table, column, type] of ADDITIONS) {
+    // PRAGMA table_info on a missing table returns an EMPTY LIST rather than throwing,
+    // so absence has to be checked explicitly — otherwise a fresh database tries to
+    // ALTER a table that schema.sql has not created yet.
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.length) continue; // new database: schema.sql creates it complete
+    if (!cols.includes(column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
+  }
 }
 
 // Sortable, readable-ish id: time prefix + randomness, so `ORDER BY id` is chronological.
@@ -68,18 +95,27 @@ function setAgentStatus(db, name, patch) {
 
 function createTask(db, t) {
   const id = t.id || newId('t');
+  // A child task inherits its parent's goal, so a planner's delegations land under the
+  // same intent without the planner having to know the goal id.
+  let goalId = t.goal_id || null;
+  if (!goalId && t.parent_id) {
+    const p = getTask(db, t.parent_id);
+    if (p) goalId = p.goal_id || null;
+  }
   db.prepare(
-    `INSERT INTO tasks (id, parent_id, from_agent, to_agent, title, brief, inputs_json, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')`
+    `INSERT INTO tasks (id, parent_id, goal_id, from_agent, to_agent, title, brief, inputs_json, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued')`
   ).run(
     id,
     t.parent_id || null,
+    goalId,
     t.from_agent,
     t.to_agent,
     t.title,
     t.brief,
     JSON.stringify(t.inputs || [])
   );
+  if (goalId) bumpGoal(db, goalId, { tasks: 1 });
   return getTask(db, id);
 }
 
@@ -102,6 +138,10 @@ function listTasks(db, filter = {}) {
   if (filter.parent_id) {
     where.push('parent_id = ?');
     vals.push(filter.parent_id);
+  }
+  if (filter.goal_id) {
+    where.push('goal_id = ?');
+    vals.push(filter.goal_id);
   }
   const sql = `SELECT * FROM tasks ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id`;
   return db.prepare(sql).all(...vals);
@@ -139,8 +179,22 @@ function updateTask(db, id, patch) {
   fields.push("updated_at = datetime('now')");
   if (!fields.length) return;
   vals.push(id);
+
+  const before = getTask(db, id);
   db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
-  return getTask(db, id);
+  const after = getTask(db, id);
+
+  // Roll the goal's durable counters forward. Cost is rolled as a DELTA (the collector
+  // updates a task's cost repeatedly as telemetry arrives), and 'done' only once —
+  // otherwise a re-PATCH of a finished task would double-count.
+  if (after && after.goal_id) {
+    const dCost = Number(after.cost_usd || 0) - Number((before && before.cost_usd) || 0);
+    const becameDone = after.status === 'done' && (!before || before.status !== 'done');
+    if (dCost || becameDone) {
+      bumpGoal(db, after.goal_id, { done: becameDone ? 1 : 0, cost: dCost });
+    }
+  }
+  return after;
 }
 
 // ---------------------------------------------------------------- events
@@ -206,8 +260,126 @@ function markMessageDelivered(db, id) {
 
 module.exports = {
   open, newId,
+  createGoal, getGoal, listGoals, updateGoal, bumpGoal, goalRollup, goalOverBudget,
   upsertAgent, listAgents, getAgent, setAgentStatus,
   createTask, getTask, listTasks, claimNextTask, updateTask,
   addEvent, listEvents, addDenial, listDenials,
   createMessage, undeliveredMessages, markMessageDelivered,
 };
+
+// ---------------------------------------------------------------- goals
+//
+// A goal is the one level above a task: a standing intent that outlives sessions.
+// Its counters are maintained incrementally rather than computed as a SUM over tasks,
+// because `hive reset` deletes tasks and a goal's lifetime spend must not silently
+// drop to zero when it does. `goalRollup()` reports both: the durable lifetime figures
+// and the live open-task counts.
+
+function slugId(title) {
+  const slug = String(title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  return 'g_' + (slug || Math.random().toString(36).slice(2, 8));
+}
+
+function createGoal(db, g) {
+  const id = g.id || slugId(g.title);
+  db.prepare(
+    `INSERT INTO goals (id, title, brief, tag, priority, budget_usd, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, g.title, g.brief || null, g.tag || null,
+        Number(g.priority) > 0 ? Number(g.priority) : 5,
+        Number(g.budget_usd) > 0 ? Number(g.budget_usd) : 0,
+        g.notes || null);
+  return getGoal(db, id);
+}
+
+// A function declaration, not a const arrow: `module.exports` appears above this section
+// in the file, and a const would be in its temporal dead zone at export time.
+function getGoal(db, id) {
+  return db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
+}
+
+function listGoals(db, filter = {}) {
+  const where = [];
+  const vals = [];
+  if (filter.status) {
+    const list = String(filter.status).split(',');
+    where.push(`status IN (${list.map(() => '?').join(',')})`);
+    vals.push(...list);
+  }
+  if (filter.tag) { where.push('tag = ?'); vals.push(filter.tag); }
+  return db
+    .prepare(`SELECT * FROM goals ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY priority, id`)
+    .all(...vals);
+}
+
+function updateGoal(db, id, patch) {
+  const fields = [];
+  const vals = [];
+  for (const k of ['title', 'brief', 'tag', 'status', 'priority', 'budget_usd', 'notes']) {
+    if (k in patch) { fields.push(`${k} = ?`); vals.push(patch[k]); }
+  }
+  if (!fields.length) return getGoal(db, id);
+  fields.push("updated_at = datetime('now')");
+  if (patch.status && ['done', 'abandoned'].includes(patch.status)) fields.push("closed_at = datetime('now')");
+  vals.push(id);
+  db.prepare(`UPDATE goals SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
+  return getGoal(db, id);
+}
+
+// Called when a task is created under a goal, and when one finishes. Incremental so the
+// figures survive a task wipe.
+function bumpGoal(db, goalId, { tasks = 0, done = 0, cost = 0 } = {}) {
+  if (!goalId || !getGoal(db, goalId)) return null;
+  db.prepare(
+    `UPDATE goals SET tasks_total = tasks_total + ?, tasks_done = tasks_done + ?,
+       spent_usd = spent_usd + ?, updated_at = datetime('now') WHERE id = ?`
+  ).run(tasks, done, Number(cost) || 0, goalId);
+  return getGoal(db, goalId);
+}
+
+// Lifetime figures from the goal row, plus the live state of tasks that still exist.
+function goalRollup(db, id) {
+  const g = getGoal(db, id);
+  if (!g) return null;
+  const live = { queued: 0, running: 0, done: 0, failed: 0, cost_usd: 0 };
+  let rows = [];
+  try {
+    rows = db.prepare('SELECT status, cost_usd FROM tasks WHERE goal_id = ?').all(id);
+  } catch (e) { /* tasks may have been reset */ }
+  for (const t of rows) {
+    live.cost_usd += Number(t.cost_usd || 0);
+    if (t.status === 'queued' || t.status === 'delivered') live.queued++;
+    else if (t.status === 'running') live.running++;
+    else if (t.status === 'done') live.done++;
+    else if (t.status === 'failed' || t.status === 'blocked') live.failed++;
+  }
+  live.cost_usd = Number(live.cost_usd.toFixed(4));
+  const cap = Number(g.budget_usd) > 0 ? Number(g.budget_usd) : 0;
+  return {
+    goal: g,
+    lifetime: {
+      tasks: g.tasks_total,
+      done: g.tasks_done,
+      spent_usd: Number(Number(g.spent_usd).toFixed(4)),
+      cap,
+      pct: cap ? Math.round((g.spent_usd / cap) * 100) : null,
+      remaining_usd: cap ? Number((cap - g.spent_usd).toFixed(4)) : null,
+    },
+    live,
+    open: live.queued + live.running,
+  };
+}
+
+// Budget check for a goal, same shape as the agent check in api/budget.js so the API
+// can treat them uniformly at claim time.
+function goalOverBudget(db, goalId) {
+  const g = goalId ? getGoal(db, goalId) : null;
+  if (!g) return null;
+  if (g.status === 'paused') return { reason: `goal ${g.id} is paused` };
+  if (g.status === 'done' || g.status === 'abandoned') return { reason: `goal ${g.id} is ${g.status}` };
+  const cap = Number(g.budget_usd);
+  if (cap > 0 && Number(g.spent_usd) >= cap) {
+    return { reason: `goal ${g.id} budget exhausted: $${Number(g.spent_usd).toFixed(4)} of $${cap.toFixed(2)}` };
+  }
+  return null;
+}

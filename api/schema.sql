@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE TABLE IF NOT EXISTS tasks (
   id            TEXT PRIMARY KEY,           -- t_<ulid-ish>
   parent_id     TEXT REFERENCES tasks(id),
+  goal_id       TEXT,                       -- the standing intent this serves (goals.id).
+                                            -- NOT a foreign key on purpose: a goal must
+                                            -- survive `hive reset` wiping tasks, and a task
+                                            -- must survive a goal being deleted.
   from_agent    TEXT NOT NULL,              -- 'human' or an agents.name
   to_agent      TEXT NOT NULL REFERENCES agents(name),
   title         TEXT NOT NULL,
@@ -51,6 +55,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_to_agent ON tasks(to_agent, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent   ON tasks(parent_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_goal     ON tasks(goal_id, status);
 
 -- ---------------------------------------------------------------------------
 -- events: append-only audit. Fed by bin/signal.js (agent hooks) and the runner.
@@ -119,3 +124,38 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
   updated_at TEXT,
   PRIMARY KEY (agent, kind)
 );
+
+-- ---------------------------------------------------------------------------
+-- goals: an intent that OUTLIVES a session. The one hierarchy level above a
+-- task, deliberately without portfolio/programme above it — this is a single
+-- operator system and those would be nouns without questions (docs/ROADMAP.md).
+--
+-- Three things a goal buys that a flat task tree cannot:
+--   1. a budget that follows the WORK rather than the worker, so a long project
+--      and a quick experiment no longer share one agent cap
+--   2. an intent that survives `hive reset`, reprovisioning and restarts —
+--      somewhere for "we are building X, here is where we got to" to live
+--   3. a priority that makes claim order meaningful instead of accidental
+--
+-- Portfolio and programme, if ever wanted, are VIEWS over `tag` — not tables.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS goals (
+  id          TEXT PRIMARY KEY,          -- g_<slug or id>
+  title       TEXT NOT NULL,
+  brief       TEXT,                      -- the standing intent, read by agents on tasks under it
+  tag         TEXT,                      -- free grouping; a "programme" is a shared tag
+  status      TEXT NOT NULL DEFAULT 'active',   -- active | paused | done | abandoned
+  priority    INTEGER NOT NULL DEFAULT 5,       -- 1 = highest; orders task claim within an agent
+  budget_usd  REAL NOT NULL DEFAULT 0,          -- 0 = uncapped. Enforced at claim like agent caps.
+  -- Spend accumulates HERE, not only as a sum over tasks: `hive reset` deletes tasks,
+  -- and a goal's lifetime spend must not silently drop to zero when it does.
+  spent_usd   REAL NOT NULL DEFAULT 0,
+  tasks_total INTEGER NOT NULL DEFAULT 0,       -- lifetime counters, same reason
+  tasks_done  INTEGER NOT NULL DEFAULT 0,
+  notes       TEXT,                      -- durable progress note: what an archivist would keep
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT,
+  closed_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status, priority);
+CREATE INDEX IF NOT EXISTS idx_goals_tag    ON goals(tag);

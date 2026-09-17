@@ -194,6 +194,68 @@ Cache *reads* are far cheaper than cache *creation*, so a long-lived session cos
 than a fresh one. Weigh that against one-session-per-task, which is safer against safeguard
 poisoning (`CLI-NOTES.md`).
 
+## Goals — the level above a task
+
+A goal is a standing intent that **outlives a session**. It is the only hierarchy level above a
+task; there is deliberately no portfolio or programme above it (see `ROADMAP.md` for why).
+
+Goals are not in `hive.yaml` — they are created at runtime, because an intent is work, not
+configuration:
+
+```bash
+hive goal new "Ship the widget reference" --budget 3 --priority 2 --tag docs
+hive send lead "Plan the reference." --goal g_ship-the-widget-reference
+hive goals                       # every goal with its rollup
+hive goal <id>                   # one goal in full, with its tasks
+hive goal set <id> --budget 5 --status paused --notes "awaiting review"
+```
+
+```
+GOAL                       STATUS   PRI   TASKS  DONE  OPEN       SPENT     BUDGET
+g_ship-the-widget-referenc active     2       7     5     2     $1.8400      $3.00  61%
+```
+
+| Field | Meaning |
+|---|---|
+| `budget_usd` | a cap that follows **the work**, not the worker. Enforced at claim time like an agent cap; `0` = uncapped |
+| `priority` | 1 highest. Reserved for ordering when agents are contended |
+| `status` | `active` · `paused` · `done` · `abandoned`. A paused or closed goal blocks delivery |
+| `tag` | free grouping. A "programme" is just a shared tag — a view, not a table |
+| `notes` | durable progress note: *"part A drafted; awaiting review"* |
+
+### Three things a goal buys
+
+1. **A budget that follows the work.** Agent caps are flat, so a long project and a quick
+   experiment share one allowance. A goal cap separates them.
+2. **An intent that survives.** `hive reset` wipes tasks, events and denials — **goals and their
+   lifetime counters survive deliberately.** Verified: after a reset the goal still reports
+   `TASKS 2` lifetime with `OPEN 0` live, and its notes intact.
+3. **Priority when agents are contended.** `claimNextTask` currently takes the oldest queued
+   task; goal priority is the dial that makes that choice meaningful.
+
+### How the rollup stays honest
+
+Lifetime counters live **on the goal row** and are updated incrementally, not computed as a
+`SUM` over tasks. A sum would silently drop to zero the moment `hive reset` deleted the tasks —
+the exact failure pattern in `POSTMORTEMS.md`. So `hive goal <id>` reports both:
+
+```
+lifetime:  5/7 tasks done, $1.8400 spent of $3.00 (61%, $1.1600 left)
+live:      2 queued, 0 running, 5 done, 0 failed
+```
+
+Cost rolls as a **delta** (the collector revises a task's cost as telemetry arrives) and `done`
+increments once (a re-PATCH of a finished task must not double-count). Both are tested.
+
+A child task **inherits its parent's goal**, so a planner's delegations land under the same
+intent without the planner needing to know the goal id.
+
+### Blocked work is parked, not lost
+
+When a goal is paused or over budget, a claimed task is returned to `queued` and the agent stays
+free for work under other goals. Verified live: 402 at claim, task back in the queue, delivered
+normally once the goal was reactivated.
+
 ## `egress`
 
 ```yaml

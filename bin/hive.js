@@ -183,10 +183,19 @@ cmds.ps = () => {
 
 cmds.send = (args) => {
   const to = args[0];
-  const brief = args.slice(1).join(' ');
-  if (!to || !brief) die('usage: hive send <agent> "<brief>"');
+  // Pull --goal <id> out of the argument list; everything else is the brief.
+  const rest = args.slice(1);
+  let goal;
+  const gi = rest.indexOf('--goal');
+  if (gi !== -1) {
+    goal = rest[gi + 1];
+    rest.splice(gi, 2);
+    if (!goal) die('--goal needs a goal id');
+  }
+  const brief = rest.join(' ');
+  if (!to || !brief) die('usage: hive send <agent> "<brief>" [--goal <goal-id>]');
   const title = brief.length > 60 ? brief.slice(0, 57) + '...' : brief;
-  const r = api('POST', '/tasks', { to_agent: to, title, brief });
+  const r = api('POST', '/tasks', { to_agent: to, title, brief, goal_id: goal });
   if (r.body && r.body.id) return out(`queued ${r.body.id} -> ${to}`);
   if (r.code === 402) {
     die(
@@ -429,6 +438,93 @@ cmds.resume = (args) => {
   out(`${n} resumed (status: ${r.body.agent.status})`);
 };
 
+cmds.goals = () => {
+  const list = api('GET', '/goals').body || [];
+  if (!list.length) return out('no goals — create one with: hive goal new "<title>" [--budget N] [--priority N] [--tag X]');
+  out('GOAL                       STATUS   PRI   TASKS  DONE  OPEN       SPENT     BUDGET');
+  for (const r of list) {
+    const g = r.goal;
+    const cap = r.lifetime.cap ? '$' + r.lifetime.cap.toFixed(2) : '—';
+    const pct = r.lifetime.pct === null ? '' : `  ${r.lifetime.pct}%`;
+    out(
+      `${g.id.slice(0, 26).padEnd(26)} ${String(g.status).padEnd(8)} ${String(g.priority).padStart(3)} ` +
+      `${String(r.lifetime.tasks).padStart(7)} ${String(r.lifetime.done).padStart(5)} ${String(r.open).padStart(5)} ` +
+      `${('$' + r.lifetime.spent_usd.toFixed(4)).padStart(11)} ${cap.padStart(10)}${pct}`
+    );
+  }
+  const spent = list.reduce((n, r) => n + r.lifetime.spent_usd, 0);
+  out(`
+goals: ${list.length}   lifetime spend: $${spent.toFixed(4)}`);
+};
+
+cmds.goal = (args) => {
+  const sub = args[0];
+  const flag = (n) => { const i = args.indexOf('--' + n); return i !== -1 ? args[i + 1] : undefined; };
+
+  if (sub === 'new') {
+    // Strip every `--flag value` pair, then whatever remains is the title.
+    const rest = args.slice(1);
+    const body = {};
+    const FLAGS = { budget: 'budget_usd', priority: 'priority', tag: 'tag', brief: 'brief' };
+    for (const [f, key] of Object.entries(FLAGS)) {
+      const i = rest.indexOf('--' + f);
+      if (i === -1) continue;
+      const v = rest[i + 1];
+      if (v === undefined) die(`--${f} needs a value`);
+      body[key] = (key === 'budget_usd' || key === 'priority') ? Number(v) : v;
+      if (Number.isNaN(body[key])) die(`--${f} needs a number, got "${v}"`);
+      rest.splice(i, 2);
+    }
+    const title = rest.join(' ').trim();
+    if (!title) die('usage: hive goal new "<title>" [--budget N] [--priority 1-9] [--tag X] [--brief "..."]');
+    body.title = title;
+    const r = api('POST', '/goals', body);
+    if (!r.body || r.body.error) die((r.body && r.body.error) || `http ${r.code}`);
+    out(`created ${r.body.goal.id}`);
+    return;
+  }
+
+  if (sub === 'set') {
+    const id = args[1];
+    if (!id) die('usage: hive goal set <id> [--budget N] [--priority N] [--status active|paused|done|abandoned] [--notes "..."]');
+    const body = {};
+    if (flag('budget') !== undefined) body.budget_usd = Number(flag('budget'));
+    if (flag('priority') !== undefined) body.priority = Number(flag('priority'));
+    if (flag('status') !== undefined) body.status = flag('status');
+    if (flag('notes') !== undefined) body.notes = flag('notes');
+    if (flag('tag') !== undefined) body.tag = flag('tag');
+    if (!Object.keys(body).length) die('nothing to set');
+    const r = api('PATCH', `/goals/${id}`, body);
+    if (!r.body || r.body.error) die((r.body && r.body.error) || `http ${r.code}`);
+    return out(`updated ${id}`);
+  }
+
+  // default: show one goal in full
+  const id = sub;
+  if (!id) die('usage: hive goal <id> | hive goal new … | hive goal set …');
+  const r = api('GET', `/goals/${id}`).body;
+  if (!r || r.error) die('no such goal');
+  const g = r.goal;
+  out(`id:        ${g.id}`);
+  out(`title:     ${g.title}`);
+  out(`status:    ${g.status}   priority: ${g.priority}${g.tag ? '   tag: ' + g.tag : ''}`);
+  out(`lifetime:  ${r.lifetime.done}/${r.lifetime.tasks} tasks done, $${r.lifetime.spent_usd.toFixed(4)} spent` +
+      (r.lifetime.cap ? ` of $${r.lifetime.cap.toFixed(2)} (${r.lifetime.pct}%, $${r.lifetime.remaining_usd.toFixed(4)} left)` : ' (uncapped)'));
+  out(`live:      ${r.live.queued} queued, ${r.live.running} running, ${r.live.done} done, ${r.live.failed} failed`);
+  if (g.brief) out(`
+--- brief ---
+${g.brief}`);
+  if (g.notes) out(`
+--- notes ---
+${g.notes}`);
+  const tasks = api('GET', `/goals/${id}/tasks`).body || [];
+  if (tasks.length) {
+    out(`
+--- tasks (${tasks.length}) ---`);
+    for (const t of tasks) out(`  ${t.id.padEnd(21)} ${String(t.to_agent).padEnd(12)} ${String(t.status).padEnd(10)} ${String(t.title).slice(0, 40)}`);
+  }
+};
+
 cmds.denials = () => {
   const list = api('GET', '/denials').body || [];
   if (!list.length) return out('no boundary violations recorded');
@@ -438,8 +534,12 @@ cmds.denials = () => {
 cmds.reset = () => {
   const { open } = require(path.join(HIVE_HOME, 'api', 'db.js'));
   const db = open(path.join(HIVE_HOME, 'api', 'hive.db'));
+  // Goals deliberately survive: a goal is a standing intent that outlives a session,
+  // and its lifetime counters are kept on the goal row precisely so a task wipe does
+  // not silently zero them (docs/CONFIG.md).
   db.exec('DELETE FROM tasks; DELETE FROM events; DELETE FROM denials; DELETE FROM messages;');
-  out('cleared tasks, events, denials, messages (agents kept)');
+  out('cleared tasks, events, denials, messages (agents and goals kept)');
+  out('  `hive goals` still shows lifetime spend and task counts');
 };
 
 cmds.help = () => {
@@ -459,6 +559,11 @@ cmds.help = () => {
   hive budget set [flags]      --run-usd N | --agent <name> --agent-usd N
                                --task-usd N | --warn-at 0.8 | --on-exceed pause|stop|warn
   hive resume <agent>          un-pause an agent that hit its cap
+  hive goals                   every goal with its rollup: tasks, spend, budget
+  hive goal <id>               one goal in full, with its tasks
+  hive goal new "<title>"      --budget N --priority 1-9 --tag X --brief "..."
+  hive goal set <id>           --budget N --priority N --status … --notes "..."
+  hive send <agent> "…" --goal <id>    file a task under a goal
   hive net up | down | status  egress: internal network + allowlist proxy
   hive net log                 every egress decision (allowed / refused)
   hive reset                   wipe tasks + events

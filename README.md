@@ -52,7 +52,7 @@ One seam is still manual: a task records its artifacts but nothing yet feeds the
 task, so moving a worker's output to a reviewer is a copy by hand. That is item 1 in
 `docs/ROADMAP.md`.
 
-**157 tests** green on Windows and WSL Linux — `node test/all.js`: 29 boundary, 27 budget, 25 egress,
+**198 tests** green on Windows and WSL Linux — `node test/all.js`: 29 boundary, 27 budget, 25 egress,
 45 classes, 21 delegation, 10 config. Run them on both platforms before trusting a change; two boundary bugs
 were only visible on one of them.
 
@@ -70,8 +70,10 @@ node bin/hive.js up                    # control plane + telemetry collector
 node bin/hive.js provision hive.yaml   # rooms, generated settings, pre-trusted dirs
 node bin/hive.js start --all           # spawn agents and their runners
 
-node bin/hive.js send lead "Plan the widget reference; split it between the workers."
+node bin/hive.js goal new "Ship the widget reference" --budget 3
+node bin/hive.js send lead "Plan it; split between the workers." --goal g_ship-the-widget-reference
 node bin/hive.js ps                    # who is alive, doing what, at what cost
+node bin/hive.js goals                 # progress and spend per goal — survives a reset
 tmux attach -t hive-worker-1           # watch a resident work (ctrl-b d to detach)
 ```
 
@@ -100,7 +102,7 @@ Read in this order:
 |---|---|
 | `docs/ARCHITECTURE.md` | the model: rooms, agents, authority, how a task flows |
 | `docs/SECURITY.md` | the five boundaries, what each does and does not cover |
-| `docs/CONFIG.md` | every `hive.yaml` field |
+| `docs/CONFIG.md` | every `hive.yaml` field, plus goals |
 | `docs/OPERATIONS.md` | running it: CLI, runtimes, telemetry, watching agents |
 | `docs/CLI-NOTES.md` | Claude Code behaviour this depends on — **read before upgrading the CLI** |
 | `docs/POSTMORTEMS.md` | the bugs that shaped the design, and why some code looks the way it does |
@@ -125,7 +127,7 @@ bin/
   signal.js            lifecycle relay: SessionStart / UserPromptSubmit / Stop
 docker/                agent image + compose stack
 templates/             role settings, generated into each agent's .claude/
-test/                  157 tests, both platforms
+test/                  198 tests, both platforms
 examples/run-1/        a real three-agent run: tasks, events, denials, output
 ```
 
