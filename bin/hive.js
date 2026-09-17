@@ -159,8 +159,15 @@ cmds.send = (args) => {
   if (!to || !brief) die('usage: hive send <agent> "<brief>"');
   const title = brief.length > 60 ? brief.slice(0, 57) + '...' : brief;
   const r = api('POST', '/tasks', { to_agent: to, title, brief });
-  if (r.body && r.body.id) out(`queued ${r.body.id} -> ${to}`);
-  else die((r.body && r.body.error) || `http ${r.code}`);
+  if (r.body && r.body.id) return out(`queued ${r.body.id} -> ${to}`);
+  if (r.code === 402) {
+    die(`${(r.body && r.body.error) || 'over budget'}
+` +
+        `  raise it:  hive budget set --agent ${to} --agent-usd <n>
+` +
+        `  then:      hive resume ${to}`);
+  }
+  die((r.body && r.body.error) || `http ${r.code}`);
 };
 
 cmds.tasks = () => {
@@ -223,6 +230,78 @@ cmds.cost = () => {
 total: $${s.totals.cost_usd}   (from claude_code.cost.usage — the CLI's own figure)`);
 };
 
+cmds.budget = (args) => {
+  const sub = args[0];
+
+  // `hive budget set --run-usd 10 --agent worker-1 --agent-usd 3 --on-exceed pause`
+  if (sub === 'set') {
+    const flag = (n) => {
+      const i = args.indexOf('--' + n);
+      return i !== -1 ? args[i + 1] : undefined;
+    };
+    const patch = {};
+    const agentName = flag('agent');
+    const map = { 'run-usd': 'run_usd', 'agent-usd': 'agent_usd', 'task-usd': 'task_usd', 'warn-at': 'warn_at' };
+    for (const [f, k] of Object.entries(map)) {
+      const v = flag(f);
+      if (v === undefined) continue;
+      if (Number.isNaN(Number(v))) die(`--${f} needs a number, got "${v}"`);
+      if (agentName && k !== 'run_usd') {
+        patch.agents = patch.agents || {};
+        patch.agents[agentName] = Object.assign({}, patch.agents[agentName], { [k]: Number(v) });
+      } else {
+        patch[k] = Number(v);
+      }
+    }
+    const oe = flag('on-exceed');
+    if (oe !== undefined) {
+      if (!['pause', 'stop', 'warn'].includes(oe)) die('--on-exceed must be pause, stop or warn');
+      patch.on_exceed = oe;
+    }
+    if (!Object.keys(patch).length) {
+      die('nothing to set. e.g. hive budget set --run-usd 10 --agent worker-1 --agent-usd 3');
+    }
+    const r = api('PATCH', '/budget', patch);
+    if (!r.body) die(`could not update budget (http ${r.code})`);
+    out('budget updated');
+    return renderBudget(r.body);
+  }
+
+  const r = api('GET', '/budget');
+  if (!r.body) die('no budget data');
+  return renderBudget(r.body);
+};
+
+function renderBudget(b) {
+  const bar = (pct) => {
+    if (pct === null || pct === undefined) return '';
+    const n = Math.max(0, Math.min(20, Math.round((pct / 100) * 20)));
+    return '[' + '#'.repeat(n) + '.'.repeat(20 - n) + ']';
+  };
+  const cap = (c) => (c ? '$' + Number(c).toFixed(2) : 'uncapped');
+  out(`on_exceed: ${b.on_exceed}    warn at ${Math.round(b.warn_at * 100)}% of a cap`);
+  out('');
+  out(`HIVE TOTAL   $${b.run.used.toFixed(4)} of ${cap(b.run.cap)}  ${bar(b.run.pct)}${b.run.pct !== null ? ' ' + b.run.pct + '%' : ''}`);
+  out('');
+  out('AGENT              USED         CAP              TASK CAP');
+  for (const a of b.agents) {
+    const flag = a.pct === null ? '' : a.pct >= 100 ? '  OVER' : a.pct >= Math.round(b.warn_at * 100) ? '  near' : '';
+    out(
+      `${a.agent.padEnd(15)} ${('$' + a.used.toFixed(4)).padStart(9)}   ${cap(a.cap).padEnd(10)} ` +
+      `${bar(a.pct)}${a.pct !== null ? ' ' + String(a.pct).padStart(3) + '%' : ''}  ${cap(a.task_cap).padEnd(9)}${flag}`
+    );
+  }
+}
+
+cmds.resume = (args) => {
+  const n = args[0];
+  if (!n) die('usage: hive resume <agent>');
+  const r = api('POST', `/agents/${n}/resume`);
+  if (r.code === 402) die((r.body && r.body.error) || 'still over budget — raise the cap first');
+  if (!r.body || r.body.error) die((r.body && r.body.error) || `http ${r.code}`);
+  out(`${n} resumed (status: ${r.body.agent.status})`);
+};
+
 cmds.denials = () => {
   const list = api('GET', '/denials').body || [];
   if (!list.length) return out('no boundary violations recorded');
@@ -249,6 +328,10 @@ cmds.help = () => {
   hive watch <agent>           how to attach and watch
   hive log [agent] | denials   events / boundary violations
   hive cost                    per-agent tokens and cost (from telemetry)
+  hive budget                  caps, spend and headroom
+  hive budget set [flags]      --run-usd N | --agent <name> --agent-usd N
+                               --task-usd N | --warn-at 0.8 | --on-exceed pause|stop|warn
+  hive resume <agent>          un-pause an agent that hit its cap
   hive reset                   wipe tasks + events
 
 env: HIVE_HOME=${HIVE_HOME}  HIVE_API=${API}  HIVE_TOKEN=${TOKEN ? 'set' : 'unset'}`);

@@ -59,8 +59,15 @@ function parseYaml(text) {
 }
 
 function coerce(v) {
-  // Strip a trailing comment, but only when it is not inside quotes.
-  if (!/^["']/.test(v)) {
+  // Strip a trailing comment. A value that STARTS quoted keeps everything up to its
+  // closing quote (so a '#' inside a string survives); anything after that quote is a
+  // comment. Note `''` is a complete empty string, not an unterminated quote — an
+  // earlier version treated it as quoted-and-open and swallowed the trailing comment.
+  const q = v[0];
+  if (q === '"' || q === "'") {
+    const end = v.indexOf(q, 1);
+    if (end !== -1) v = v.slice(0, end + 1);
+  } else {
     const h = v.search(/\s+#/);
     if (h !== -1) v = v.slice(0, h).trim();
   }
@@ -113,7 +120,9 @@ function provision(planPath, opts = {}) {
     const roomDir = path.join(HIVE_HOME, 'rooms', roomName);
     const agents = Array.isArray(room.agents) ? room.agents : [];
 
-    for (const agent of agents) {
+    for (const rawAgent of agents) {
+      // defaults -> room -> agent, most specific wins
+      const agent = Object.assign({}, plan.defaults || {}, { runtime: room.runtime || (plan.defaults || {}).runtime }, rawAgent);
       const name = agent.name;
       const role = agent.role || 'worker';
       if (!name) throw new Error(`room ${roomName} has an agent with no name`);
@@ -159,6 +168,10 @@ function provision(planPath, opts = {}) {
           `agent_dir: ${agentDir}`,
           `log_dir: ${path.join(HIVE_HOME, 'logs', name)}`,
           `tmux_session: hive-${name}`,
+          `tools: ${agent.tools || 'file-only'}`,
+          `memory: ${agent.memory || '2g'}`,
+          `cpus: ${agent.cpus || 2}`,
+          `task_timeout_s: ${agent.task_timeout_s || 900}`,
           '',
         ].join('\n')
       );
@@ -179,6 +192,27 @@ function provision(planPath, opts = {}) {
   // --- shared area + api dir
   fs.mkdirSync(path.join(HIVE_HOME, 'shared', 'artifacts'), { recursive: true });
   fs.mkdirSync(path.join(HIVE_HOME, 'api'), { recursive: true });
+
+  // --- budget.json: the API reads this on every cost check, so caps in hive.yaml take
+  // effect without touching code. `hive budget set` edits the same file.
+  if (plan.budget) {
+    const b = plan.budget;
+    fs.writeFileSync(
+      path.join(HIVE_HOME, 'budget.json'),
+      JSON.stringify(
+        {
+          run_usd: Number(b.run_usd) || 0,
+          agent_usd: Number(b.agent_usd) || 0,
+          task_usd: Number(b.task_usd) || 0,
+          warn_at: Number(b.warn_at) || 0.8,
+          on_exceed: b.on_exceed || 'pause',
+          agents: b.agents || {},
+        },
+        null,
+        2
+      ) + '\n'
+    );
+  }
 
   // --- ONE pass over ~/.claude.json for every room (avoids the write race)
   preTrust(roomPaths);

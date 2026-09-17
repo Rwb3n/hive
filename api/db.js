@@ -6,6 +6,16 @@ const path = require('path');
 function open(dbPath) {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
+
+  // Several processes write this file — the api server, the OTLP collector, and the CLI.
+  // WAL allows concurrent readers with one writer, but a writer that arrives while
+  // another is committing gets SQLITE_BUSY *immediately* unless a busy timeout is set.
+  // Without this the collector dies with "database is locked" and cost data is silently
+  // lost, which is exactly the failure that makes budget enforcement useless.
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA busy_timeout = 5000');
+  db.exec('PRAGMA synchronous = NORMAL');
+
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schema);
   return db;

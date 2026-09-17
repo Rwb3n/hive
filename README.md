@@ -26,8 +26,10 @@ hive/
     signal.js            lifecycle relay (SessionStart/UserPromptSubmit/Stop)
   docker/                agent image + compose stack (api, collector, dashboards)
   templates/             role settings, generated into each agent's .claude/
-  test/                  29 boundary tests, green on Windows and Linux
+    budget.js            caps: enforced at claim time, so nothing bypasses them
+  test/                  56 tests (boundary + budget), green on Windows and Linux
   docs/
+    CONFIG.md            everything in hive.yaml: rooms, roles, authority, budget
     FINDINGS.md          verified CLI behaviour — read before changing anything
     RUNTIME.md           how to launch an agent unattended, every trap documented
     CONTAINERS.md        the kernel-enforced boundary; what it does and does not cover
@@ -108,6 +110,7 @@ runner turns those into tasks, and the API still checks the policy. Workers cann
 | **A role granted a shell (tmux runtime)** | **not contained — use the docker runtime** |
 | A role granted a shell (docker runtime) | contained: host FS unreachable, verified |
 | Network egress from a container | **not restricted** — see `docs/CONTAINERS.md` |
+| Spend past a cap | refused at claim (402); agent paused, audited |
 
 The tool boundary (`permissions.deny`) is the stronger half of the tmux runtime: it removes
 the capability from the session entirely rather than filtering arguments. Path matching cannot
@@ -129,6 +132,30 @@ builder-1       3724     2487      188794         49580    $0.6553
 One caveat worth knowing: `cost.usage` is a **DELTA** sum — datapoints must be added, not
 max'd. Summing one run's deltas reproduced the CLI's `total_cost_usd` to the cent; taking the
 max under-reported by 40%.
+
+## Budget
+
+Caps are declared in `hive.yaml` and enforced by the **API at claim time**, so no runner and
+no stray `curl` can route around them:
+
+```yaml
+budget:
+  run_usd: 5.00        # whole hive
+  agent_usd: 2.00      # per agent (per-agent overrides supported)
+  task_usd: 1.00       # a single task
+  on_exceed: pause     # pause | stop | warn
+```
+
+```
+hive budget                                    # caps, spend, headroom
+hive budget set --agent worker-1 --agent-usd 3
+hive resume worker-1
+```
+
+Verified live: a worker with a $0.06 cap did one real task ($0.0973), **paused itself 3
+seconds later** with the fix commands in its own log, refused the next task at the door, and
+— once the cap was raised and it was resumed — recovered without a restart. Details and how
+to size a cap: `docs/CONFIG.md`.
 
 ## Before you change anything
 

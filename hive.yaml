@@ -10,6 +10,17 @@ home: /home/you/hive
 api:
   host: 127.0.0.1
   port: 8787
+  otlp_port: 4318
+
+# Defaults every agent inherits unless it overrides them. Keeping these here rather
+# than in code means `hive provision` is the only thing that needs to know about them.
+defaults:
+  runtime: tmux             # tmux (hook boundary, file-only) | docker (kernel boundary, may have a shell)
+  tools: file-only          # file-only | shell
+  model: ''                 # '' = whatever the CLI defaults to
+  memory: 2g                # docker runtime only
+  cpus: 2                   # docker runtime only
+  task_timeout_s: 900
 
 rooms:
   - name: room-3
@@ -17,7 +28,7 @@ rooms:
     agents:
       - name: supervisor
         role: supervisor
-        tools: file-only        # file-only | shell (shell is unsafe until containers)
+        tools: file-only
       - name: worker-1
         role: worker
         tools: file-only
@@ -31,3 +42,34 @@ policy:
   supervisor_may_task: worker      # own room only
   worker_may_task: none            # workers report upward via results, they do not task
   max_depth: 1                     # a worker cannot spawn agents (Task/Agent denied too)
+
+# ---------------------------------------------------------------------------
+# Budget. Enforced by the API at claim time, so nothing bypasses it — not a
+# second runner, not a direct curl. Costs come from the CLI's own telemetry
+# (claude_code.cost.usage), so these are real dollars, not estimates.
+#
+# Why this matters: a subscription has 5-hour and 7-day windows, every agent
+# pays a per-turn context floor before doing any work, and a fan-out across
+# several agents can quietly consume the interactive budget. Caps are cheap
+# insurance against a runaway loop.
+#
+# Set any value to 0 or omit it to leave that dimension uncapped.
+# ---------------------------------------------------------------------------
+budget:
+  run_usd: 5.00             # whole building, since the last `hive reset`
+  agent_usd: 2.00           # per agent, default for all
+  task_usd: 1.00            # a single task may not exceed this (checked after it runs)
+  warn_at: 0.8              # log a warning once an agent passes this fraction of its cap
+  on_exceed: pause          # pause = stop delivering work, keep the agent alive
+                            # stop  = also kill the agent's session
+                            # warn  = log only, keep going (not recommended unattended)
+
+  # Per-agent overrides. A supervisor decomposes and integrates, so it needs less
+  # than a worker that writes whole files.
+  agents:
+    supervisor:
+      agent_usd: 1.50
+    worker-1:
+      agent_usd: 2.00
+    worker-2:
+      agent_usd: 2.00

@@ -20,6 +20,8 @@ const TOKEN = process.env.HIVE_TOKEN || '';
 const POLL_MS = Number(process.env.HIVE_POLL_MS || 1500);
 const BOOT_TIMEOUT_MS = Number(process.env.HIVE_BOOT_TIMEOUT_MS || 60000);
 const TASK_TIMEOUT_MS = Number(process.env.HIVE_TASK_TIMEOUT_MS || 900000);
+// A paused agent polls slowly: it is waiting on a human to raise a cap, not on work.
+const BUDGET_POLL_MS = Number(process.env.HIVE_BUDGET_POLL_MS || 15000);
 
 // Dialog signatures that mean "a human is needed" — the pane will hang forever otherwise.
 //
@@ -305,8 +307,27 @@ function run(agentDir, opts = {}) {
   api('PATCH', `/agents/${name}`, { status: 'idle', session_id: ready.session_id || null });
 
   let idleLoops = 0;
+  let overBudget = false;
   for (;;) {
     const claim = api('POST', `/agents/${name}/claim`);
+
+    // 402 = over budget. The API has already paused the agent; do not keep polling at
+    // the normal rate (that just logs noise), and do not exit — a cap can be raised and
+    // the agent resumed with `hive resume`, and this runner should pick work up again.
+    if (claim.code === 402) {
+      const why = (claim.body && claim.body.error) || 'over budget';
+      if (!overBudget) {
+        log(name, `PAUSED: ${why}`);
+        log(name, `  raise the cap with: hive budget set --agent ${name} --agent-usd <n>`);
+        log(name, `  then resume with:   hive resume ${name}`);
+        overBudget = true;
+      }
+      if (opts.once) { log(name, 'exiting (--once)'); return 3; }
+      sleep(BUDGET_POLL_MS);
+      continue;
+    }
+    if (overBudget) { log(name, 'budget cleared — resuming'); overBudget = false; }
+
     if (claim.code === 204 || !claim.body) {
       idleLoops++;
       if (opts.once && idleLoops > 2) { log(name, 'no work; exiting (--once)'); return 0; }

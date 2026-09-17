@@ -17,6 +17,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const db = require('./db');
+const budget = require('./budget');
 
 const HIVE_HOME = process.env.HIVE_HOME || path.join(process.env.HOME || process.env.USERPROFILE, 'hive');
 const DB_PATH = process.env.HIVE_DB || path.join(HIVE_HOME, 'api', 'hive.db');
@@ -120,6 +121,15 @@ route('POST', '/tasks', (p, body) => {
       return { _status: 403, error: `${from} (${f.role}) may not task ${to.name} (${to.role})` };
     }
   }
+  // Courtesy check: refuse to queue work for an agent that is already exhausted, so a
+  // supervisor delegating into a spent worker is told now instead of queueing a task
+  // that can never run. The claim gate is still the authority.
+  const bcfg = budget.load(HIVE_HOME);
+  const bv = budget.check(D, bcfg, to.name);
+  if (!bv.allow && (bcfg.on_exceed || 'pause') !== 'warn') {
+    return { _status: 402, error: `cannot queue for ${to.name}: ${bv.reason}`, budget: bv };
+  }
+
   const t = db.createTask(D, { ...body, from_agent: from });
   db.addEvent(D, { agent: from, task_id: t.id, evt: 'task.created', payload: { to: to.name, title: t.title } });
   return t;
@@ -134,10 +144,47 @@ route('PATCH', '/tasks/:id', (p, body) => {
   if (!t) return { _status: 404, error: 'no such task' };
   const out = db.updateTask(D, p.id, body);
   db.addEvent(D, { agent: t.to_agent, task_id: t.id, evt: 'task.' + (body.status || 'updated') });
+
+  // A single runaway task cannot be prevented after the fact, but it can be the last
+  // one: pause the agent so the next claim is refused.
+  if (body.status === 'done' || body.status === 'failed') {
+    const cfg = budget.load(HIVE_HOME);
+    const tv = budget.checkTask(cfg, t.to_agent, (out && out.cost_usd) || 0);
+    if (!tv.allow && (cfg.on_exceed || 'pause') !== 'warn') {
+      db.setAgentStatus(D, t.to_agent, { status: 'paused' });
+      db.addEvent(D, { agent: t.to_agent, task_id: t.id, evt: 'budget.task_exceeded', payload: tv });
+    }
+  }
   return out;
 });
-// The runner claims work atomically.
+// The runner claims work atomically. This is the HARD budget gate: nothing is
+// delivered to an agent that is over its cap, whoever queued it and whichever runner
+// asks. Checked before the claim so an over-budget task stays queued rather than
+// being marked delivered and then refused.
 route('POST', '/agents/:name/claim', (p) => {
+  const cfg = budget.load(HIVE_HOME);
+  const verdict = budget.check(D, cfg, p.name);
+
+  if (!verdict.allow) {
+    const mode = cfg.on_exceed || 'pause';
+    if (mode === 'warn') {
+      db.addEvent(D, { agent: p.name, evt: 'budget.over_warn_only', payload: verdict });
+    } else {
+      // Record once per transition, not on every poll, or the event log floods.
+      const a = db.getAgent(D, p.name);
+      if (a && a.status !== 'paused') {
+        db.setAgentStatus(D, p.name, { status: 'paused' });
+        db.addEvent(D, { agent: p.name, evt: 'budget.paused', payload: verdict });
+      }
+      return { _status: 402, error: verdict.reason, budget: verdict };
+    }
+  } else if (verdict.state === 'warn') {
+    const a = db.getAgent(D, p.name);
+    if (a && a.status !== 'warned') {
+      db.addEvent(D, { agent: p.name, evt: 'budget.warn', payload: verdict });
+    }
+  }
+
   const t = db.claimNextTask(D, p.name);
   if (!t) return { _status: 204, empty: true };
   return t;
@@ -188,6 +235,34 @@ route('GET', '/agents/:name/messages', (p) => db.undeliveredMessages(D, p.name))
 route('POST', '/messages/:id/delivered', (p) => {
   db.markMessageDelivered(D, p.id);
   return { ok: true };
+});
+
+// --- budget: read the report, adjust caps, resume a paused agent
+route('GET', '/budget', () => budget.report(D, budget.load(HIVE_HOME)));
+route('PATCH', '/budget', (p, body) => {
+  const cfg = budget.load(HIVE_HOME);
+  for (const k of ['run_usd', 'agent_usd', 'task_usd', 'warn_at', 'on_exceed']) {
+    if (body[k] !== undefined) cfg[k] = body[k];
+  }
+  if (body.agents && typeof body.agents === 'object') {
+    cfg.agents = cfg.agents || {};
+    for (const [name, caps] of Object.entries(body.agents)) {
+      cfg.agents[name] = Object.assign({}, cfg.agents[name], caps);
+    }
+  }
+  budget.save(HIVE_HOME, cfg);
+  db.addEvent(D, { evt: 'budget.updated', payload: body });
+  return budget.report(D, cfg);
+});
+// Raising a cap does not by itself un-pause an agent: the operator says when to resume.
+route('POST', '/agents/:name/resume', (p) => {
+  const a = db.getAgent(D, p.name);
+  if (!a) return { _status: 404, error: 'no such agent' };
+  const v = budget.check(D, budget.load(HIVE_HOME), p.name);
+  if (!v.allow) return { _status: 402, error: `still over budget: ${v.reason}`, budget: v };
+  db.setAgentStatus(D, p.name, { status: 'idle' });
+  db.addEvent(D, { agent: p.name, evt: 'budget.resumed' });
+  return { ok: true, agent: db.getAgent(D, p.name) };
 });
 
 // --- a compact status view for `hive ps`

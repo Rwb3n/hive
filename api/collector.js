@@ -142,7 +142,26 @@ const server = http.createServer((req, res) => {
       try {
         applied = ingest(JSON.parse(buf.toString('utf8')));
       } catch (e) {
-        // protobuf or malformed: accept it so the agent is never blocked by telemetry
+        // Never die on a telemetry payload. Two cases matter:
+        //  - protobuf or malformed JSON: nothing to do, accept and move on
+        //  - SQLITE_BUSY under concurrent writes: retry briefly, then drop this batch
+        //    (DELTA metrics mean one dropped batch under-reports; a crashed collector
+        //    loses everything, which is far worse — that bug made caps unenforceable)
+        if (/locked|busy/i.test(String(e.message))) {
+          // Retry on the next tick rather than spinning: db.js sets busy_timeout=5000,
+          // so a genuine lock has already been waited out and a retry is cheap.
+          const body = buf.toString('utf8');
+          setTimeout(() => {
+            try {
+              const n = ingest(JSON.parse(body));
+              if (n) process.stdout.write(`otlp: ${n} datapoints applied (retry)\n`);
+            } catch (e2) {
+              process.stderr.write('otlp: dropped a batch (db busy)\n');
+            }
+          }, 250);
+        } else {
+          process.stderr.write(`otlp: ignored a payload (${String(e.message).slice(0, 80)})\n`);
+        }
       }
     }
     res.writeHead(200, { 'content-type': 'application/json' });
