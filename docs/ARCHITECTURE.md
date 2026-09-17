@@ -1,12 +1,18 @@
 # Architecture
 
-## The three nouns
+## The nouns
 
 | | |
 |---|---|
 | **room** | a scope boundary: a directory plus a capability set. The room is the capability. |
 | **agent** | a resident assigned to a room. Several agents may share one room. |
-| **API machine** | tasks, authority policy, audit, budget. The only component everything else talks to. |
+| **goal** | a standing intent that outlives a session. The one level above a task. |
+| **task** | one unit of work for one agent. Nests via `parent_id`. |
+| **API machine** | goals, tasks, authority policy, audit, budget. The only component everything else talks to. |
+
+`goal` is the only durable one. Rooms and agents are regenerated from `hive.yaml`; tasks are
+wiped by `hive reset`. A goal — with its budget, its lifetime counters and its progress note —
+survives all of that on purpose, because it is the thing that says *what we are trying to do*.
 
 A room and an agent are separate on purpose. Scope belongs to the *room*, so an agent never
 restates where it may write, and several agents can be co-located (a planner and its workers)
@@ -114,7 +120,7 @@ are ceremony until they have something to decide that a planner cannot.
 ```
 hive send ──► tasks(queued)
                    │
-                   ▼  runner claims it (atomic; budget gate refuses here if over cap)
+                   ▼  runner claims it (atomic; agent AND goal budget gates refuse here)
             writes task.json + input/ INTO the workspace
                    │
                    ▼  tmux send-keys:  "read ./task.json and begin"
@@ -137,6 +143,10 @@ submit the prompt early, and multi-line text mangles. The runner writes the task
 **Inputs are copied into the room.** An agent cannot read anything outside its workspace, so the
 runner copies the files a task references into `workspace/input/`. Duplicated bytes, absolute
 boundary.
+
+**A blocked task is parked, not lost.** If the agent is over its cap, or the task's goal is
+paused or exhausted, the claim returns 402 and the task goes back to `queued` — so the agent
+stays free for work under other goals and nothing disappears.
 
 **Results arrive by hook, not by scraping.** The `Stop` hook carries
 `last_assistant_message` — the agent's complete reply as text, no ANSI. `capture-pane` is used
@@ -170,8 +180,9 @@ Node built-ins only: `http` + `node:sqlite`. No dependencies.
 
 ```
 agents      name, room, role, room_root, runtime, status, session_id
-tasks       id, parent_id, from_agent, to_agent, brief, status, result, cost_usd, artifacts
-events      append-only audit: SessionStart, UserPromptSubmit, Stop, task.*, budget.*, denial
+goals       id, title, brief, tag, status, priority, budget_usd, spent_usd, counters, notes
+tasks       id, parent_id, goal_id, from_agent, to_agent, brief, status, result, cost_usd, artifacts
+events      append-only audit: SessionStart, UserPromptSubmit, Stop, task.*, goal.*, budget.*, denial
 denials     boundary violations, promoted out of events for visibility
 messages    agent-to-agent notes that are not tasks
 agent_costs / agent_tokens   running totals from OTLP telemetry
@@ -180,6 +191,11 @@ agent_costs / agent_tokens   running totals from OTLP telemetry
 The schema *is* the interface — the HTTP layer, the runner and the CLI all agree there. Several
 processes write this file (server, collector, CLI), which is why `db.js` sets `journal_mode=WAL`
 and `busy_timeout=5000`; see `POSTMORTEMS.md` for what happens when it does not.
+
+`db.js` also runs an additive `migrate()` on every open, **before** applying the schema:
+`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so a new column never
+reaches an existing database and the server dies on first query. Keep migrations idempotent and
+never destructive — a hive's DB holds goals that are meant to outlive everything else in it.
 
 ## Runtimes
 

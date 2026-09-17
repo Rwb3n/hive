@@ -16,8 +16,10 @@
 //   hive cost                      per-agent tokens and real cost
 //   hive budget [set …]            caps, spend, headroom
 //   hive resume <agent>            un-pause an agent that hit its cap
+//   hive goals                     every goal with its rollup
+//   hive goal <id>|new|set         the level above a task: durable intent + budget
 //   hive net up|down|status|log    egress: internal network + allowlist proxy
-//   hive reset                     wipe tasks/events (keeps agents)
+//   hive reset                     wipe tasks/events (keeps agents AND goals)
 //
 // Reference: docs/OPERATIONS.md
 

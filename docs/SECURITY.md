@@ -196,6 +196,11 @@ it (verified: a raw `curl` claim returns 402).
 | `POST /tasks` | courtesy — refuses to queue work that could never run |
 | `PATCH /tasks/:id` done | per-task cap — cannot undo the spend, but makes it the last one |
 
+Caps exist on two axes. **Per agent** (`budget.json`) limits a worker; **per goal**
+(`goals.budget_usd`) limits a piece of work, so a long project and a quick experiment no longer
+share one allowance. Both are checked at the same chokepoint. A goal that is paused, done or
+over budget blocks delivery and the task returns to `queued` — parked, not lost.
+
 Costs come from the CLI's own telemetry (`claude_code.cost.usage`), so caps are real dollars, not
 estimates from a price table. Verified live: a worker with a $0.06 cap did one real task
 ($0.0973), paused itself 3 seconds later, had the next task refused, and recovered on its own

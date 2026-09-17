@@ -36,6 +36,19 @@ and no MCP servers — so it cannot call the control plane, reach another room, 
 The runner and the hooks are the only things that talk to the API. **That is what makes the
 isolation real rather than declared**, and each boundary below was verified by trying to break it.
 
+## The model
+
+```
+goal     a standing intent that outlives a session — with a budget and a progress note
+  task   one unit of work for one agent; nests via parent_id
+room     a scope boundary: a directory plus a capability set
+agent    a resident of a room, with a class that fixes what it may do and may command
+```
+
+Only the goal is durable. Rooms and agents are regenerated from `hive.yaml`, tasks are wiped by
+`hive reset` — a goal survives all of it, because it is the thing that says what you are trying
+to do.
+
 ## Status
 
 Working, and exercised on real work. A supervisor decomposed a task, delegated to two workers who

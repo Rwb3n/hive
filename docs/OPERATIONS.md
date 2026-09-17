@@ -55,8 +55,13 @@ hive budget                            caps, spend, headroom
 hive budget set [flags]                --run-usd N | --agent <name> --agent-usd N
                                        --task-usd N | --warn-at 0.8 | --on-exceed pause|stop|warn
 hive resume <agent>                    un-pause an agent that hit its cap
+hive goals                             every goal with its rollup
+hive goal <id>                         one goal in full, with its tasks
+hive goal new "<title>"                --budget N --priority 1-9 --tag X --brief "..."
+hive goal set <id>                     --budget N --priority N --status … --notes "..."
+hive send <agent> "…" --goal <id>      file a task under a goal
 hive net up | down | status | log      egress: internal network + allowlist proxy
-hive reset                             wipe tasks/events/denials (keeps agents)
+hive reset                             wipe tasks/events/denials (keeps agents AND goals)
 ```
 
 ## A normal session
@@ -66,14 +71,17 @@ hive up                                  # api + collector
 hive start --all                         # agents boot in 2-3s
 hive ps
 
-hive send lead "Plan the widget reference; split it between worker-1 and worker-2."
+hive goal new "Ship the widget reference" --budget 3 --priority 2
+hive send lead "Plan it; split between worker-1 and worker-2." --goal g_ship-the-widget-reference
 hive tasks                               # watch the planner's delegations appear
+hive goals                               # progress and spend, rolled up per goal
 hive task t_0mu5xkh2z7jif18              # brief, artifacts, and the full result
 
 tmux attach -t hive-worker-1             # watch a resident work; ctrl-b d to detach
 tmux attach -t hive-runner-worker-1      # watch its runner instead
 
-hive cost                                # what it actually cost
+hive cost                                # what it actually cost per agent
+hive goal g_ship-the-widget-reference    # …and per goal, with its task list
 hive stop --all && hive down
 ```
 
@@ -82,6 +90,7 @@ hive stop --all && hive down
 | Question | Command |
 |---|---|
 | who is alive, doing what, at what cost | `hive ps` |
+| how is a piece of work progressing | `hive goals`, then `hive goal <id>` for its tasks |
 | what did an agent actually reply | `hive task <id>` — the `result` is its `Stop` message |
 | did it try to leave its room | `hive denials` |
 | did it try to reach the network | `hive net log` |
@@ -201,6 +210,8 @@ aggregation point for a multi-machine hive.
 | `runner.boot_failed` | an unknown first-run dialog | `hive log <agent>` includes the pane text; add the flag to `~/.claude.json` |
 | `tools: shell` refused at provision | it needs `runtime: docker` | set the runtime, or use `file-only` |
 | everything refused with 402 | run-wide cap exhausted | `hive budget set --run-usd <n>` then resume the agents |
+| one goal's tasks refused, others fine | that goal is paused, done or over its budget | `hive goal <id>`, then `hive goal set <id> --budget N --status active` |
+| a goal shows lifetime tasks but 0 open | normal after `hive reset` — tasks are wiped, goals are not | nothing to fix; `hive goal <id>` shows both figures |
 
 Start with `hive log`, then `hive denials` and `hive net log`. Between them they cover
 "what did it try to do that it was not allowed to do", which is most failures.
