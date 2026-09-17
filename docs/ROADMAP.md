@@ -129,9 +129,9 @@ Candidates that genuinely differ:
 
 | Class | tools | authority | session | Why it is a new shape |
 |---|---|---|---|---|
-| **`archivist`** | file-only, writes `outbox/` only | none | persistent | the only role where a long-lived accumulating context is the *point*; distils memory (item 8c) |
+| **`archivist`** | file-only, writes `outbox/` only | none | persistent | the only role where a long-lived accumulating context is the *point*; distils memory (item 9c) |
 | **`integrator`** | file-only (or shell in a worktree room) | none | fresh | merges N workers' branches and resolves conflicts. Distinct from a supervisor: it integrates and does **not** delegate |
-| **`auditor`** | read-only | none | fresh | a reviewer pointed at the **hive itself** — denials, costs, the fact store — rather than at work products. Same capability, different subject, and the right auditor for item 8 |
+| **`auditor`** | read-only | none | fresh | a reviewer pointed at the **hive itself** — denials, costs, the fact store — rather than at work products. Same capability, different subject, and the right auditor for item 9 |
 | **`negotiator`** | read-only | may task **peers** | fresh | the only class that would need a new authority edge: two planners reconciling overlapping plans. **Speculative — do not build without a concrete case** |
 
 And two that sound like classes but are not:
@@ -170,7 +170,91 @@ actually sees.
 
 **Cost.** A day. Mostly deciding the taxonomy, not writing it.
 
-### 7. The unused `messages` table
+### 7. Workflow lifecycle — keeping agents on track without drift
+
+**The problem, from experience.** Building this system, the recurring failure was not an agent
+doing the work badly. It was work finishing *incompletely* and nobody noticing: code changed and
+the doc left stale, a test added and the count in the README not updated, a run finished and the
+cleanup skipped. Every one of those was caught by a human remembering, which is exactly the
+mechanism that should not be load-bearing.
+
+There are **two** problems here and they need different machinery. Conflating them is how this
+item turns into a box-ticking exercise.
+
+#### 7a. Process discipline *within* a task — required outputs, checked by the runner
+
+A task declares what "done" looks like; the runner verifies it before marking the task complete.
+
+```yaml
+templates:
+  doc-change:
+    requires:
+      - artifact: "*.md"                 # something was actually written
+      - test: "node test/all.js"         # the RUNNER runs it, not the agent
+      - clean: [tmux, containers]        # no runtime state left behind
+    on_missing: followup                 # followup | fail | warn
+```
+
+On a failed check the runner **issues a follow-up task to the same agent** naming precisely what
+is missing — *"`test/all.js` exits 1; the doc under `docs/` was not modified"* — rather than
+blocking. The agent gets to finish; the gap is recorded as an event either way, so a pattern of
+misses is visible in `hive log`.
+
+#### 7b. Lifecycle *between* tasks — goal phases with transition rules
+
+A goal moves through named phases, and reaching one with no open tasks triggers the next step:
+
+```
+planning ──► building ──► reviewing ──► integrating ──► done
+```
+
+Each transition is a rule in the API: *"`building`, zero open tasks, artifacts present → create a
+review task for the room's reviewer."* That is the automation that would have meant nobody
+*decided* to run the reviewer — it would simply be the next phase. `goals.status` already exists;
+this adds a `phase` beside it and a small table of transitions.
+
+Needs items 1 (artifact hand-off) and 2 (review loop) first — a phase transition that cannot move
+work to the next agent is just a label.
+
+#### What the CC hooks can and cannot do here
+
+Measured, not assumed (`CLI-NOTES.md`):
+
+- **`Stop`** fires at end of turn with `last_assistant_message`. Good for **detecting** that a
+  turn ended without the expected artifact.
+- **`PreToolUse`** sees one tool call. It is the wrong layer entirely for process shape.
+- **Hooks run outside the agent's session.** They cannot add a turn, cannot send a follow-up
+  prompt, cannot say "you forgot the test". They can observe, and they can veto.
+
+So: **hooks detect, the runner corrects.** A `Stop` hook that blocks because a checklist item is
+unticked risks a wedged pane, and a stuck pane is already one of the worst failure modes in this
+system. The runner owns the loop and can issue a follow-up task; the hook should only report.
+
+#### ⚠️ This is the roadmap item most likely to be net-negative
+
+A checklist an agent can satisfy by *saying* the right words is worse than no checklist, because
+it manufactures confidence. That is the pattern `POSTMORTEMS.md` documents nine times over: a
+mechanism appearing to work while doing nothing.
+
+So the governing rule, and it is not negotiable for this item:
+
+> **A check verifies an artifact or an exit code. Never a phrase in prose.**
+>
+> "The reply mentions tests" is theatre. "`node test/all.js` exits 0" is a fact.
+> "A file matching `docs/*.md` has an mtime newer than the task's `delivered_at`" is a fact.
+
+Second rule: **`on_missing: followup` by default, never `fail`.** An incomplete task that gets a
+second chance is better than a failed task a human has to re-file, and far better than a blocked
+pane.
+
+Third: the checks themselves have to be cheap and non-LLM. A follow-up task costs a context floor
+(~$0.07–0.10); a `test:` check costs nothing. Prefer the free one.
+
+**Cost.** 7a is a day: a `templates:` block in `hive.yaml`, three or four check types, and the
+follow-up path in the runner. 7b is a day on top of items 1 and 2. Do 7a first — it is
+independently useful and it is the half that catches the drift that actually happened here.
+
+### 8. The unused `messages` table
 
 **Today.** The schema has `messages` with a delivery flag and nothing uses it. It was built for
 "agent-to-agent notes that are not tasks" and that need never materialised, because results
@@ -181,7 +265,7 @@ mid-task without failing) or drop the table. Dead schema is a trap for the next 
 
 **Cost.** An hour to delete; a day to wire up properly.
 
-### 8. Hive memory — retrieval first, an archivist last
+### 9. Hive memory — retrieval first, an archivist last
 
 **The question.** Should the hive remember things across tasks and sessions? And if so: a memory
 *room*, a memory *agent*, both, or neither?
@@ -219,7 +303,7 @@ until the layers below exist.
 
 #### Three layers, earned in order
 
-**8a. Retrieval — no new storage, no agent.** The runner injects relevant prior context into
+**9a. Retrieval — no new storage, no agent.** The runner injects relevant prior context into
 `task.json`: the goal's `notes`, the results of sibling tasks under the same goal, and any
 denials this agent hit before. All from tables that already exist. **This is most of the value**
 for none of the risk, and it needs no model in the loop. Depends on item 1 (artifact hand-off),
@@ -227,7 +311,7 @@ which is the same machinery.
 
 *Cost: a day. Do this and stop, unless it proves insufficient.*
 
-**8b. A `facts` table — written by the runner, not a model.** Append-only, structured, derived
+**9b. A `facts` table — written by the runner, not a model.** Append-only, structured, derived
 from signals the runner already sees:
 
 ```sql
@@ -240,7 +324,7 @@ to the run that produced it. Provenance is not decoration here — see the warni
 
 *Cost: a day, plus deciding the `kind` taxonomy (which is the actual work).*
 
-**8c. An archivist agent — compression, not storage.** Only once 8a and 8b exist. Its job is to
+**9c. An archivist agent — compression, not storage.** Only once 9a and 9b exist. Its job is to
 read a goal's accumulated facts and results and write a short standing brief into `goals.notes` —
 which already survives `hive reset` and is already injected by 8a. Natural triggers: a goal
 closing, or N tasks since the last distillation.
@@ -271,7 +355,7 @@ task visibly acting on injected context, not merely the context being present in
 
 ## Later — real but not yet earned
 
-### 9. Multi-machine
+### 10. Multi-machine
 
 `ARCHITECTURE.md` already puts an HTTP seam in the right place for it, and `CLI-NOTES.md` notes
 `claude gateway --config` exists as a possible aggregation point. Needs per-agent tokens (today
@@ -280,13 +364,13 @@ second host.
 
 **Cost.** A week, and it buys nothing until one machine is genuinely the constraint.
 
-### 10. Egress: containing the allowlisted host
+### 11. Egress: containing the allowlisted host
 
 `SECURITY.md` states the limit plainly: an agent can reach `api.anthropic.com` and could encode
 data into requests there. Containing that means a proxy that inspects and rewrites API traffic —
 a different project, and one with its own failure modes.
 
-### 11. Web view over the event log
+### 12. Web view over the event log
 
 Everything needed is already recorded: `events`, `denials`, `agent_costs`, goals with their
 rollups, task trees with `parent_id`. A read-only page over the DB would make a run legible at a glance in a way `hive ps`
@@ -303,7 +387,7 @@ cannot. Pure convenience — worth doing only once the pipeline above is closed.
   priority is useful; a goal with a schedule is a different product.
 - **A memory room.** Memory is delivered to an agent as an input, not somewhere it goes. A
   shared writable room would need a hole in the scope guard and would reintroduce the collisions
-  per-agent workspaces prevent. See item 8.
+  per-agent workspaces prevent. See item 9.
 - **A `tester` or `researcher` class.** `tester` is `builder` with a different prompt — same
   tools, authority, session and runtime, so it moves no dial. `researcher` would need the web
   tools the egress design denies; a room with a wider allowlist plus an existing class is the
@@ -321,6 +405,18 @@ cannot. Pure convenience — worth doing only once the pipeline above is closed.
   cheaper per turn and containers need it anyway.
 
 ---
+
+## How these relate
+
+Item 7 (lifecycle) and item 9 (memory) are the two that could each turn into ceremony, and they
+guard against opposite failures. Memory stops the hive *forgetting* what it learned; lifecycle
+stops it *skipping* what it should do. Both are only safe under the same constraint: a mechanism
+must produce checkable evidence, not a plausible-sounding claim.
+
+Item 7a in particular would have caught most of the drift in this project's own build — stale
+doc counts, a template that did not exist, cleanup not run. That is the argument for it; the
+argument against is that a gameable checklist is worse than none. Build it with the artifact-or-
+exit-code rule or do not build it.
 
 ## The standing rule
 
