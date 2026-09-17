@@ -84,6 +84,15 @@ cmds.up = () => {
   tmux('new-session', '-d', '-s', 'hive-api', '-c', HIVE_HOME);
   const cmd = `HIVE_HOME=${HIVE_HOME}${TOKEN ? ` HIVE_TOKEN=${TOKEN}` : ''} node ${server} 2>&1 | tee -a ${path.join(HIVE_HOME, 'api', 'server.log')}`;
   tmux('send-keys', '-t', 'hive-api', cmd, 'Enter');
+  // The OTLP collector: cost and token accounting. Agents export to it directly.
+  const collector = path.join(HIVE_HOME, 'api', 'collector.js');
+  if (fs.existsSync(collector)) {
+    tmux('kill-session', '-t', 'hive-otel');
+    tmux('new-session', '-d', '-s', 'hive-otel', '-c', HIVE_HOME);
+    tmux('send-keys', '-t', 'hive-otel',
+      `HIVE_HOME=${HIVE_HOME} node ${collector} 2>&1 | tee -a ${path.join(HIVE_HOME, 'api', 'collector.log')}`, 'Enter');
+    out('collector up at http://127.0.0.1:4318 (telemetry)');
+  }
   for (let i = 0; i < 30; i++) {
     if (api('GET', '/health', undefined, true).code === 200) return out(`api up at ${API}`);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
@@ -93,7 +102,8 @@ cmds.up = () => {
 
 cmds.down = () => {
   tmux('kill-session', '-t', 'hive-api');
-  out('api stopped');
+  tmux('kill-session', '-t', 'hive-otel');
+  out('api + collector stopped');
 };
 
 cmds.start = (args) => {
@@ -130,13 +140,14 @@ cmds.stop = (args) => {
 cmds.ps = () => {
   const s = api('GET', '/status').body;
   if (!s) die('no status');
-  out('AGENT         ROOM     ROLE         STATUS    QUEUED  RUN  DONE  FAIL  SESSION');
+  out('AGENT         ROOM     ROLE         STATUS    QUEUED  RUN  DONE  FAIL      COST  SESSION');
   for (const a of s.agents) {
     const t = a.tasks || {};
     out(
       `${a.name.padEnd(13)} ${String(a.room).padEnd(8)} ${String(a.role).padEnd(12)} ` +
       `${String(a.status).padEnd(9)} ${String(t.queued || 0).padStart(6)} ${String(t.running || 0).padStart(4)} ` +
-      `${String(t.done || 0).padStart(5)} ${String(t.failed || 0).padStart(5)}  ${(a.session_id || '-').slice(0, 8)}`
+      `${String(t.done || 0).padStart(5)} ${String(t.failed || 0).padStart(5)} ` +
+      `${('$' + (a.cost_usd || 0).toFixed(4)).padStart(9)}  ${(a.session_id || '-').slice(0, 8)}`
     );
   }
   out(`\ntasks: ${s.totals.tasks}  done: ${s.totals.done}  denials: ${s.totals.denials}  cost: $${s.totals.cost_usd}`);
@@ -196,6 +207,22 @@ cmds.log = (args) => {
   }
 };
 
+cmds.cost = () => {
+  const s = api('GET', '/status').body;
+  if (!s) die('no status');
+  out('AGENT          INPUT   OUTPUT  CACHE-READ  CACHE-CREATE       COST');
+  for (const a of s.agents) {
+    const k = a.tokens || {};
+    out(
+      `${a.name.padEnd(13)} ${String(k.input || 0).padStart(6)} ${String(k.output || 0).padStart(8)} ` +
+      `${String(k.cacheRead || 0).padStart(11)} ${String(k.cacheCreation || 0).padStart(13)} ` +
+      `${('$' + (a.cost_usd || 0).toFixed(4)).padStart(10)}`
+    );
+  }
+  out(`
+total: $${s.totals.cost_usd}   (from claude_code.cost.usage — the CLI's own figure)`);
+};
+
 cmds.denials = () => {
   const list = api('GET', '/denials').body || [];
   if (!list.length) return out('no boundary violations recorded');
@@ -221,6 +248,7 @@ cmds.help = () => {
   hive tasks | task <id>       list / show tasks
   hive watch <agent>           how to attach and watch
   hive log [agent] | denials   events / boundary violations
+  hive cost                    per-agent tokens and cost (from telemetry)
   hive reset                   wipe tasks + events
 
 env: HIVE_HOME=${HIVE_HOME}  HIVE_API=${API}  HIVE_TOKEN=${TOKEN ? 'set' : 'unset'}`);

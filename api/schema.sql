@@ -99,3 +99,23 @@ CREATE TABLE IF NOT EXISTS messages (
   delivered  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_agent, delivered);
+
+-- ---------------------------------------------------------------------------
+-- agent_costs / agent_tokens: running totals from OTLP telemetry.
+-- claude_code.cost.usage is exported as a DELTA sum, so these accumulate by
+-- ADDING each datapoint. (Verified: summing one run's four deltas reproduced the
+-- CLI's total_cost_usd exactly; taking the max under-reported by 40%.)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_costs (
+  agent      TEXT PRIMARY KEY,
+  cost_usd   REAL NOT NULL DEFAULT 0,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_tokens (
+  agent      TEXT NOT NULL,
+  kind       TEXT NOT NULL,   -- input | output | cacheRead | cacheCreation
+  tokens     INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT,
+  PRIMARY KEY (agent, kind)
+);

@@ -115,6 +115,9 @@ function spawnAgent(cfg) {
   // Env goes on the claude invocation itself with an explicit minimal PATH:
   // the Windows PATH leaks into WSL through interop and breaks the shell line.
   const settings = path.join(DIR, '.claude', 'settings.json');
+  // Telemetry: the CLI exports its own cost figure, so the hive never has to estimate.
+  // hive.agent/hive.room carry through as OTLP resource attributes (see docs/TELEMETRY.md).
+  const OTLP = process.env.HIVE_OTLP || 'http://127.0.0.1:4318';
   const cmd = [
     'env',
     `HIVE_ROOM_ROOT=${ROOM}`,
@@ -122,6 +125,12 @@ function spawnAgent(cfg) {
     `HIVE_AGENT=${name}`,
     `HIVE_API=${API}`,
     TOKEN ? `HIVE_TOKEN=${TOKEN}` : '',
+    'CLAUDE_CODE_ENABLE_TELEMETRY=1',
+    'OTEL_METRICS_EXPORTER=otlp',
+    'OTEL_EXPORTER_OTLP_PROTOCOL=http/json',
+    `OTEL_EXPORTER_OTLP_ENDPOINT=${OTLP}`,
+    'OTEL_METRIC_EXPORT_INTERVAL=10000',
+    `OTEL_RESOURCE_ATTRIBUTES=hive.agent=${name},hive.room=${cfg.room || 'unknown'},service.namespace=hive`,
     'PATH=$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin',
     'claude',
     '--settings', settings,

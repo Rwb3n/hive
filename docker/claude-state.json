@@ -1,0 +1,16 @@
+{
+  "hasCompletedOnboarding": true,
+  "theme": "dark",
+  "autoUpdates": false,
+  "fullscreenUpsellSeenCount": 3,
+  "numStartups": 1,
+  "shiftEnterKeyBindingInstalled": true,
+  "projects": {
+    "/room": {
+      "allowedTools": [],
+      "history": [],
+      "hasTrustDialogAccepted": true,
+      "hasCompletedProjectOnboarding": true
+    }
+  }
+}

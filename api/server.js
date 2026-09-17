@@ -194,6 +194,15 @@ route('POST', '/messages/:id/delivered', (p) => {
 route('GET', '/status', () => {
   const agents = db.listAgents(D);
   const tasks = db.listTasks(D);
+  // Telemetry totals (OTLP collector writes these; DELTA sums already accumulated).
+  const costs = {};
+  const tokens = {};
+  try {
+    for (const r of D.prepare('SELECT agent, cost_usd FROM agent_costs').all()) costs[r.agent] = r.cost_usd;
+    for (const r of D.prepare('SELECT agent, kind, tokens FROM agent_tokens').all()) {
+      (tokens[r.agent] = tokens[r.agent] || {})[r.kind] = r.tokens;
+    }
+  } catch (e) { /* tables appear on first telemetry */ }
   const byAgent = {};
   for (const a of agents) {
     byAgent[a.name] = { queued: 0, running: 0, done: 0, failed: 0 };
@@ -213,11 +222,13 @@ route('GET', '/status', () => {
       name: a.name, room: a.room, role: a.role, status: a.status,
       session_id: a.session_id, tmux_session: a.tmux_session,
       last_seen_at: a.last_seen_at, tasks: byAgent[a.name],
+      cost_usd: Number((costs[a.name] || 0).toFixed(4)),
+      tokens: tokens[a.name] || {},
     })),
     totals: {
       tasks: tasks.length,
       done: tasks.filter((t) => t.status === 'done').length,
-      cost_usd: Number(cost.toFixed(4)),
+      cost_usd: Number((Object.values(costs).reduce((x, y) => x + y, 0) || cost).toFixed(4)),
       denials: db.listDenials(D, { limit: 1000 }).length,
     },
   };

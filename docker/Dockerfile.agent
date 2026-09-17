@@ -1,0 +1,64 @@
+# A room, as a container.
+#
+# The contract this image upholds:
+#   - /room is the ONLY writable path bound from the host; the kernel enforces it,
+#     so an agent may have a shell and still not reach anything outside its room
+#   - /hive-bin holds the scope-guard + signal hooks, mounted READ-ONLY so an agent
+#     cannot disable its own boundary
+#   - network is restricted by the compose network, not by the image
+#
+# Note the layering: the scope-guard hook still runs inside the container. It is now
+# defence in depth rather than the boundary itself — it gives the agent a clear, useful
+# error ("outside your room") instead of a bare EACCES from the kernel.
+
+FROM node:22-bookworm-slim
+
+# Toolchain a worker plausibly needs to run tests. Keep this list honest: every tool
+# here is something a shell-enabled agent can run, and the container is what makes that safe.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl ripgrep python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code. Pinned: a new version can introduce a new first-run dialog that hangs an
+# unattended spawn (see docs/RUNTIME.md), so upgrades are a deliberate act.
+ARG CLAUDE_VERSION=2.1.274
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} \
+    && npm cache clean --force
+
+# Run as a non-root user owning /room. Root in a container is not a boundary by itself,
+# and a non-root agent cannot chmod its way around the read-only hook mount.
+#
+# Do NOT mask failures here with `|| true`: if the user is not created the later steps
+# fail confusingly ("unable to find user agent"). The node image already ships a `node`
+# user at 1000, so reuse the id when it collides instead of guessing.
+ARG UID=1001
+ARG GID=1001
+RUN set -eux; \
+    if ! getent group ${GID} >/dev/null; then groupadd -g ${GID} agent; fi; \
+    GNAME="$(getent group ${GID} | cut -d: -f1)"; \
+    if ! getent passwd ${UID} >/dev/null; then \
+      useradd -u ${UID} -g "${GNAME}" -m -s /bin/bash agent; \
+    fi; \
+    UNAME="$(getent passwd ${UID} | cut -d: -f1)"; \
+    UHOME="$(getent passwd ${UID} | cut -d: -f6)"; \
+    mkdir -p /room /hive-bin /hive-logs "${UHOME}/.claude"; \
+    chown -R ${UID}:${GID} /room /hive-logs "${UHOME}"; \
+    ln -sfn "${UHOME}" /agent-home; \
+    echo "built for user=${UNAME} uid=${UID} home=${UHOME}"
+
+# Onboarding state, baked in: without these the interactive TUI stops on the theme picker,
+# the login-method prompt, the folder-trust dialog, or the renderer upsell, and the pane
+# hangs forever with no human to answer (see docs/RUNTIME.md). The runner overwrites this
+# at container start with the real userID; these values only need to unblock the boot.
+COPY --chown=${UID}:${GID} docker/claude-state.json /agent-home/.claude.json
+
+USER ${UID}:${GID}
+WORKDIR /room
+
+ENV HIVE_ROOM_ROOT=/room \
+    HIVE_LOG_DIR=/hive-logs \
+    PATH=/usr/local/bin:/usr/bin:/bin
+
+# No ENTRYPOINT: the runner decides whether this container runs an interactive `claude`
+# under tmux, a one-shot `claude -p`, or a shell for debugging.
+CMD ["claude", "--settings", "/room/.claude-settings.json", "--strict-mcp-config"]

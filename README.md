@@ -13,20 +13,25 @@ fixed. See `examples/run-1/`.
 hive/
   hive.yaml              the building plan: rooms, agents, policy
   api/                   the API machine (HTTP + SQLite, node built-ins only)
-    schema.sql           tasks, events, denials, messages, agents
+    schema.sql           tasks, events, denials, messages, agents, costs, tokens
     server.js            the control plane
+    collector.js         OTLP receiver: writes real cost + tokens into the DB
     db.js
   bin/
     hive.js              the CLI
     provision.js         hive.yaml -> rooms, generated settings, pre-trusted dirs
     room-runner.js       spawns an agent, delivers tasks, collects results
+    runtime-docker.js    a room as a container — the boundary a shell cannot cross
     scope-guard.js       the room boundary (PreToolUse hook)
     signal.js            lifecycle relay (SessionStart/UserPromptSubmit/Stop)
+  docker/                agent image + compose stack (api, collector, dashboards)
   templates/             role settings, generated into each agent's .claude/
   test/                  29 boundary tests, green on Windows and Linux
   docs/
     FINDINGS.md          verified CLI behaviour — read before changing anything
     RUNTIME.md           how to launch an agent unattended, every trap documented
+    CONTAINERS.md        the kernel-enforced boundary; what it does and does not cover
+    TELEMETRY.md         cost/token accounting straight from the CLI
   examples/run-1/        a real three-agent run: tasks, events, denials, output
 ```
 
@@ -58,7 +63,7 @@ cp /mnt/c/Users/<you>/.claude/.credentials.json ~/.claude/.credentials.json
 # install and run
 cp -r api bin templates hive.yaml ~/hive/
 cd ~/hive
-node bin/hive.js up                      # start the API machine (in tmux)
+node bin/hive.js up                      # start the API machine + telemetry collector
 node bin/hive.js provision hive.yaml     # build rooms, generate settings, pre-trust
 node bin/hive.js start --all             # spawn agents + runners
 node bin/hive.js ps                      # who is alive, what they are doing, cost
@@ -67,6 +72,7 @@ node bin/hive.js send supervisor "Split the doc work between your workers."
 node bin/hive.js tasks                   # the task tree
 node bin/hive.js task <id>               # brief, artifacts, and the full result
 node bin/hive.js denials                 # boundary violations
+node bin/hive.js cost                    # per-agent tokens and real cost
 
 tmux attach -t hive-worker-1             # watch a resident work (ctrl-b d to detach)
 ```
@@ -99,11 +105,30 @@ runner turns those into tasks, and the API still checks the policy. Workers cann
 | Symlink escapes, incl. symlink + `..` traversal | blocked |
 | Guard crash / missing env / bad payload | fails **closed** |
 | Audit log | written outside the room; the agent cannot edit it |
-| **A role granted a shell** | **not contained — waits for containers** |
+| **A role granted a shell (tmux runtime)** | **not contained — use the docker runtime** |
+| A role granted a shell (docker runtime) | contained: host FS unreachable, verified |
+| Network egress from a container | **not restricted** — see `docs/CONTAINERS.md` |
 
-The tool boundary (`permissions.deny`) is the stronger half: it removes the capability from
-the session entirely rather than filtering arguments. Path matching cannot secure a shell,
-so a worker that must run tests needs a container, not a better hook.
+The tool boundary (`permissions.deny`) is the stronger half of the tmux runtime: it removes
+the capability from the session entirely rather than filtering arguments. Path matching cannot
+secure a shell — so a worker that must run tests gets `runtime: docker`, where the kernel does
+the enforcing. Verified: a shell-enabled agent fixed failing tests and could not touch the host.
+
+## Cost
+
+Telemetry comes from the CLI itself (`claude_code.cost.usage` over OTLP), so nothing is
+estimated and there is no price table to go stale:
+
+```
+hive cost
+AGENT          INPUT   OUTPUT  CACHE-READ  CACHE-CREATE       COST
+worker-1        1417      234      153898          1099    $0.0970
+builder-1       3724     2487      188794         49580    $0.6553
+```
+
+One caveat worth knowing: `cost.usage` is a **DELTA** sum — datapoints must be added, not
+max'd. Summing one run's deltas reproduced the CLI's `total_cost_usd` to the cent; taking the
+max under-reported by 40%.
 
 ## Before you change anything
 
