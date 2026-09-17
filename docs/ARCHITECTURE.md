@@ -9,21 +9,21 @@
 | **API machine** | tasks, authority policy, audit, budget. The only component everything else talks to. |
 
 A room and an agent are separate on purpose. Scope belongs to the *room*, so an agent never
-restates where it may write, and several agents can be co-located (a supervisor and its workers)
+restates where it may write, and several agents can be co-located (a planner and its workers)
 without each re-declaring the boundary. Each agent still gets its own `workspace/` inside the
 room, so two workers cannot clobber each other.
 
 ```
 rooms/room-3/
-  supervisor/
+  lead/                   (a planner)
     agent.yaml            identity, role, runtime, limits   (generated)
     agent.md              the role prompt the agent reads   (generated, editable)
     .claude/settings.json tool allow/deny + hooks           (GENERATED — never hand-edit)
     workspace/            the ONLY writable tree; the agent's cwd
     inbox/ outbox/        human-readable mirror of the task queue
     state/
-  worker-1/  …
-  worker-2/  …
+  worker-1/  worker-2/    (workers)
+  critic/                 (a reviewer)
 logs/<agent>/             denials, signals, runner log — OUTSIDE the room, so an agent
                           cannot edit its own audit trail
 ```
@@ -47,9 +47,46 @@ credible: there is no channel to abuse, rather than a channel that is policed.
 Containerised agents do get a shell, and there the kernel and the egress proxy take over —
 see `SECURITY.md`.
 
+## Classes: capability and authority travel together
+
+An agent class bundles the four things that must agree for a role to mean anything:
+
+```
+tools     what it may do            enforced by permissions.deny in generated settings
+role      whether it may delegate   enforced by the API's canTask()
+runtime   where it runs             tmux (hook boundary) or docker (kernel boundary)
+session   fresh | persistent        whether the session survives between tasks
+```
+
+Bundling them is the point. A "planner" that could still `Write` would be a worker with a
+different prompt; a "reviewer" that could create tasks would be a slow planner. The classes are
+meaningful because the capability and the authority are removed together:
+
+| Class | tools | may delegate | in effect |
+|---|---|---|---|
+| `planner` | read-only | yes, own room | decides what to do, **cannot implement it** |
+| `worker` | file-only | no | implements, **cannot create work** |
+| `reviewer` | read-only | no | judges, **cannot edit or order fixes** |
+| `supervisor` | file-only | yes, own room | decomposes and integrates |
+| `builder` | shell (docker) | no | implements and runs tests |
+
+The read-only classes still have the scope guard on `Read`/`Glob`/`Grep`, because a `Grep`
+outside the room returns matching *lines* — it leaks file contents without writing anything.
+
+### Session policy
+
+`session: fresh` restarts the agent between tasks. It costs a context floor per task
+(~$0.07–0.10) and buys two things: a safeguard flag cannot poison a queue (`CLI-NOTES.md`), and
+a planner or reviewer does not carry the previous task's conclusions into this one. Judgement
+roles default to `fresh` for the second reason as much as the first.
+
+`session: persistent` keeps the session, so later tasks are mostly cache reads and much cheaper.
+Right for a long-running supervisor that benefits from accumulated context.
+
 ## Authority is not transport
 
-Hierarchy (`boss → manager → supervisor → worker`) is a policy graph, not a routing graph.
+Hierarchy — `planner`/`supervisor` above `worker`/`builder`/`reviewer`, with `manager` and
+`boss` above those — is a policy graph, not a routing graph.
 
 Messages never travel *through* intermediate agents: every hop would cost tokens and lose
 information to summarisation. Instead every agent's work arrives directly from the API, and the
@@ -57,18 +94,20 @@ hierarchy is enforced as **policy** on who may create tasks for whom.
 
 ```
 POST /tasks  {from_agent, to_agent}
-   human        → anyone
-   supervisor   → workers in its own room
-   manager      → supervisors, workers
-   worker       → nobody          ← verified: 403
+   human                        → anyone
+   planner, supervisor          → producers in its OWN room
+   manager                      → across rooms
+   boss                         → anyone
+   worker, builder, reviewer    → nobody          ← verified: 403
 ```
 
-A worker may not task a peer, nor its own supervisor. Workers report upward through task
-*results*, not by creating work.
+A worker may not task a peer or its planner; a reviewer may not order a fix. Producers report
+upward through task *results*, not by creating work. Pinned by `test/classes.test.js`, refusals
+included.
 
 Practical consequence: depth costs money and latency, and parallelism at the leaves is where the
-value is. A supervisor plus N workers is the shape that pays; a `boss` and `manager` above it are
-ceremony until they have something to decide that the supervisor cannot.
+value is. One delegator plus N producers is the shape that pays; `manager` and `boss` above it
+are ceremony until they have something to decide that a planner cannot.
 
 ## How a task flows
 
@@ -85,12 +124,12 @@ hive send ──► tasks(queued)
                    ▼
             Stop hook ──► last_assistant_message ──► tasks(done) + artifacts + cost
                    │
-                   └─ supervisor's DELEGATE lines ──► new tasks (policy re-checked)
+                   └─ planner's DELEGATE lines ──► new tasks (policy re-checked)
 ```
 
 Three details that matter:
 
-**The task body is never sent as keystrokes.** A newline in supervisor-generated text would
+**The task body is never sent as keystrokes.** A newline in planner-generated text would
 submit the prompt early, and multi-line text mangles. The runner writes the task to
 `workspace/task.json` and sends one short line pointing at it. The DB is the source of truth;
 `inbox/*.json` is a human-readable mirror for debugging by eye.
@@ -105,17 +144,25 @@ only as a boot watchdog for first-run dialogs, which appear before any hook fire
 
 ## Delegation
 
-A supervisor delegates by emitting lines in its reply:
+A planner or supervisor delegates by emitting lines in its reply:
 
 ```
 DELEGATE worker-1: <instruction>
 DELEGATE worker-2: <instruction>
 ```
 
-The runner parses those and creates real tasks; the API still applies the authority policy, so a
-supervisor cannot delegate outside its room and a worker's `DELEGATE` line is refused. The
-supervisor has no other way to reach a worker — no shell, no network — which is what keeps the
-policy authoritative rather than advisory.
+The runner parses those and creates real tasks; the API re-applies the authority policy, so a
+planner cannot delegate outside its room and a worker's or reviewer's `DELEGATE` line is refused.
+A delegator has no other way to reach a producer — no shell, no network — which is what keeps
+the policy authoritative rather than advisory.
+
+Each instruction is everything its recipient gets: it cannot see the delegator's reasoning, the
+other instructions, or anything outside its own room. So a good delegation names the output file,
+states the sources, and says what *not* to cover. The generated `agent.md` for a planner says so.
+
+The parser is deliberately liberal about shape — colon or dash separators, list items, bold or
+backticked names — because a planner writes prose, not a protocol. It was once too strict and
+silently dropped a correct plan (`POSTMORTEMS.md` #12).
 
 ## The control plane
 

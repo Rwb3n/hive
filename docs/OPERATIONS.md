@@ -66,8 +66,8 @@ hive up                                  # api + collector
 hive start --all                         # agents boot in 2-3s
 hive ps
 
-hive send supervisor "Split the doc work between your workers."
-hive tasks                               # watch the tree fill in
+hive send lead "Plan the widget reference; split it between worker-1 and worker-2."
+hive tasks                               # watch the planner's delegations appear
 hive task t_0mu5xkh2z7jif18              # brief, artifacts, and the full result
 
 tmux attach -t hive-worker-1             # watch a resident work; ctrl-b d to detach
@@ -86,6 +86,7 @@ hive stop --all && hive down
 | did it try to leave its room | `hive denials` |
 | did it try to reach the network | `hive net log` |
 | why did an agent stop | `hive log <agent>` — `budget.paused`, `runner.boot_failed`, … |
+| did a delegation get refused | `hive log <planner>` — a 403 is logged by the runner as `delegation refused` |
 | the full turn-by-turn detail | the session transcript: `~/.claude/projects/<slug>/<session>.jsonl` |
 
 The transcript is worth knowing about: it is the most informative source of all, and it is what

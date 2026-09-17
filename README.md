@@ -18,13 +18,18 @@ own room, coordinated through a small HTTP control plane.
                                    │ delivers work
         ┌──────────────────────────┼──────────────────────────┐
         ▼                          ▼                          ▼
-   ┌─────────┐               ┌──────────┐              ┌──────────┐
-   │ room-3  │               │  room-3  │              │  room-9  │
-   │ super-  │  DELEGATE ──► │ worker-1 │              │ builder  │
-   │ visor   │               │ worker-2 │              │ (shell)  │
-   └─────────┘               └──────────┘              └──────────┘
-    file-only                 file-only                 container
+   ┌──────────┐              ┌──────────┐             ┌──────────┐
+   │ planner  │  DELEGATE ─► │ worker-1 │             │ reviewer │
+   │          │              │ worker-2 │  ── output ►│          │
+   └──────────┘              └──────────┘             └──────────┘
+    read-only                  file-only                read-only
+    decides, cannot            implements               judges, cannot
+    implement                                           edit or delegate
 ```
+
+The roles that **decide** cannot implement; the role that **judges** cannot edit or order fixes.
+That is enforced by denying `Write`/`Edit` and by the API's authority policy, not by asking
+nicely — see `docs/SECURITY.md`.
 
 An agent's world is files in its room. It has no network tool, no shell (unless containerised),
 and no MCP servers — so it cannot call the control plane, reach another room, or forge a message.
@@ -38,6 +43,14 @@ ran in parallel, then integrated their output — editing it, not pasting it. In
 audited a claim against fresh test output, found an unverified assertion in this project's own
 docs, and that led to a real symlink-traversal escape being found and fixed
 (`examples/run-1/`, `docs/POSTMORTEMS.md`).
+
+Three agent classes ship: **planner** (read-only, delegates), **worker** (writes), **reviewer**
+(read-only, reports). Verified live — the reviewer caught both defects seeded into a worker's
+output and correctly passed a third claim that turned out to be fine.
+
+One seam is still manual: a task records its artifacts but nothing yet feeds them to the next
+task, so moving a worker's output to a reviewer is a copy by hand. That is item 1 in
+`docs/ROADMAP.md`.
 
 **157 tests** green on Windows and WSL Linux — `node test/all.js`: 29 boundary, 27 budget, 25 egress,
 45 classes, 21 delegation, 10 config. Run them on both platforms before trusting a change; two boundary bugs
@@ -57,7 +70,7 @@ node bin/hive.js up                    # control plane + telemetry collector
 node bin/hive.js provision hive.yaml   # rooms, generated settings, pre-trusted dirs
 node bin/hive.js start --all           # spawn agents and their runners
 
-node bin/hive.js send supervisor "Split the doc work between your workers."
+node bin/hive.js send lead "Plan the widget reference; split it between the workers."
 node bin/hive.js ps                    # who is alive, doing what, at what cost
 tmux attach -t hive-worker-1           # watch a resident work (ctrl-b d to detach)
 ```
@@ -66,13 +79,14 @@ Full command reference and the container/egress setup: `docs/OPERATIONS.md`.
 
 ## What is enforced
 
-Four independent boundaries. Each was red-teamed, and what *isn't* covered is stated too.
+Five independent boundaries. Each was red-teamed, and what *isn't* covered is stated too.
 
 | | Mechanism | Verified by attacking it |
 |---|---|---|
 | **Filesystem** | `PreToolUse` hook (tmux) / mount namespace (docker) | writes, reads, Glob/Grep, symlink + `..` traversal, credential reads — all blocked |
-| **Capability** | `permissions.deny` removes tools from the session entirely | a shell-seeking prompt found no shell; denying `Bash` alone was *not* enough |
+| **Capability** | `permissions.deny` removes tools from the session entirely | a shell-seeking prompt found no shell; denying `Bash` alone was *not* enough; a planner and reviewer genuinely cannot `Write` |
 | **Network** | internal docker network + allowlist proxy | a raw shell could not exfiltrate by HTTPS, HTTP, raw TCP or DNS |
+| **Authority** | the API refuses tasks the policy forbids | a worker cannot task a peer; a reviewer cannot order a fix |
 | **Spend** | caps enforced at task-claim time | an agent paused itself 3s after exceeding its cap |
 
 Not contained: a shell in the *tmux* runtime (use `runtime: docker`), traffic to the one
@@ -85,11 +99,12 @@ Read in this order:
 | | |
 |---|---|
 | `docs/ARCHITECTURE.md` | the model: rooms, agents, authority, how a task flows |
-| `docs/SECURITY.md` | the four boundaries, what each does and does not cover |
+| `docs/SECURITY.md` | the five boundaries, what each does and does not cover |
 | `docs/CONFIG.md` | every `hive.yaml` field |
 | `docs/OPERATIONS.md` | running it: CLI, runtimes, telemetry, watching agents |
 | `docs/CLI-NOTES.md` | Claude Code behaviour this depends on — **read before upgrading the CLI** |
 | `docs/POSTMORTEMS.md` | the bugs that shaped the design, and why some code looks the way it does |
+| `docs/ROADMAP.md` | what is missing, in the order it hurts — and what is deliberately not planned |
 
 ## Layout
 

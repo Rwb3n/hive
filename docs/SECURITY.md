@@ -1,6 +1,6 @@
 # Security model
 
-Four independent boundaries. Each was verified by attacking it, and the limits of each are
+Five independent boundaries. Each was verified by attacking it, and the limits of each are
 stated. Where this document says *verified*, it means a test exists that exercises the attack —
 not that the code looks correct. That distinction was learned the hard way (`POSTMORTEMS.md`).
 
@@ -9,7 +9,12 @@ not that the code looks correct. That distinction was learned the hard way (`POS
 | Filesystem | `PreToolUse` hook (tmux) / mount namespace (docker) | hook: good against mistakes and drift. container: absolute |
 | Capability | `permissions.deny` — the tool is absent from the session | strong; stronger than filtering arguments |
 | Network | internal docker network + allowlist proxy | absolute except the allowlisted host |
+| Authority | the API refuses tasks the policy forbids | absolute; the only path to creating work |
 | Spend | budget caps checked at task-claim time | absolute; nothing is delivered over cap |
+
+The first three limit what one agent can *reach*. The last two limit what it can *cause* — and
+together with the class system they give the property the design exists for: the role that
+decides cannot implement, and the role that judges cannot edit or order fixes.
 
 ## 1. Filesystem
 
@@ -79,6 +84,21 @@ scope-guard's promise is not absolute for `Bash`. The read-only rootfs keeps the
 session entirely rather than inspecting its arguments. Observed in-pane:
 *"I don't see a Bash tool in this session."* No prompt, no hang — the agent adapts and reports.
 
+### Three tool classes
+
+| `tools` | Allowed | Denied | Used by |
+|---|---|---|---|
+| `read-only` | Read, Glob, Grep | **Write, Edit**, and everything below | planner, reviewer |
+| `file-only` | + Write, Edit | shell, network, delegation-adjacent tools (21 entries) | worker, supervisor |
+| `shell` | + Bash | same minus Bash; **requires `runtime: docker`** | builder |
+
+`read-only` is a capability boundary, not a suggestion. A planner cannot write the code it plans;
+a reviewer cannot edit the file it criticises. `provision` refuses an unknown `tools` value, and
+refuses `shell` outside the docker runtime, so neither can be misconfigured silently.
+
+All three keep the scope guard on the read tools, because `Grep` outside the room returns
+matching *lines* — it exfiltrates file contents without ever writing.
+
 ### ⚠️ Denying `Bash` alone does not remove shell execution
 
 Given an ordinary task and **no adversarial prompting**, a file-only agent did this:
@@ -143,7 +163,28 @@ vendored into its room.
 needs a proxy that inspects and rewrites API traffic — a different project. Also: the *tmux*
 runtime has no egress restriction; it is kept safe by having no network tools at all.
 
-## 4. Spend
+## 4. Authority
+
+Who may create work for whom, enforced by `canTask()` on `POST /tasks` — the one chokepoint
+every task passes, including the ones a planner generates from `DELEGATE` lines.
+
+| From | May task |
+|---|---|
+| `human` | anyone |
+| `planner`, `supervisor` | producers **in its own room** |
+| `manager` | across rooms |
+| `boss` | anyone |
+| `worker`, `builder`, `reviewer` | **nobody** — 403 |
+
+The refusals are the interesting half, and they are tested: a worker cannot task a peer or its
+planner, a reviewer cannot order a fix, nobody tasks upward or sideways, and a planner cannot
+reach into another room. An unknown role gets no authority by default.
+
+Combined with the capability boundary this gives the property the class set exists for: **the
+role that decides cannot implement, and the role that judges cannot edit or order.** Neither
+depends on the agent choosing to cooperate.
+
+## 5. Spend
 
 Caps are declared in `hive.yaml` and enforced by the **API**, not the runner — the claim endpoint
 is the one chokepoint every task passes, so a second runner or a stray `curl` cannot route around
