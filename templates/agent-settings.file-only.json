@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "VERIFIED working template for a file-only room agent (claude 2.1.274, interactive mode).",
+    "Generated per agent by `hive spawn` — do not hand-edit inside a room; room.yaml is the source of truth.",
+    "Substitutions: {{HIVE_BIN}} = hive's bin dir on the AGENT's filesystem (WSL path, not /mnt/d).",
+    "Launch with env on the command itself:",
+    "  env HIVE_ROOM_ROOT=<room> HIVE_LOG_DIR=<logs outside room> PATH=<minimal> claude --settings <this file> --strict-mcp-config",
+    "A shell `export` before `claude` does NOT reach the hook child. See docs/RUNTIME.md."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": ["Read", "Write", "Edit", "Glob", "Grep"],
+    "deny": [
+      "Bash",
+      "PowerShell",
+      "Monitor",
+      "ToolSearch",
+      "Task",
+      "Agent",
+      "Workflow",
+      "Skill",
+      "TaskOutput",
+      "TaskStop",
+      "SendMessage",
+      "RemoteTrigger",
+      "PushNotification",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "EnterWorktree",
+      "ExitWorktree",
+      "WebFetch",
+      "WebSearch",
+      "NotebookEdit"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|Read|Glob|Grep",
+        "hooks": [{ "type": "command", "command": "node {{HIVE_BIN}}/scope-guard.js" }]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [{ "type": "command", "command": "node {{HIVE_BIN}}/signal.js SessionStart" }]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "node {{HIVE_BIN}}/signal.js UserPromptSubmit" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "node {{HIVE_BIN}}/signal.js Stop" }]
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+# The building plan.
+#
+# A ROOM is a scope boundary (a directory + a capability set).
+# An AGENT is a resident assigned to a room; several may share one room.
+# The room is the capability — an agent cannot widen its own scope, because
+# .claude/settings.json is generated from here on every provision.
+
+home: /home/you/hive
+
+api:
+  host: 127.0.0.1
+  port: 8787
+
+rooms:
+  - name: room-3
+    runtime: tmux
+    agents:
+      - name: supervisor
+        role: supervisor
+        tools: file-only        # file-only | shell (shell is unsafe until containers)
+      - name: worker-1
+        role: worker
+        tools: file-only
+      - name: worker-2
+        role: worker
+        tools: file-only
+
+# Authority, not transport. Messages never route through intermediate agents
+# (each hop costs tokens and loses information); the API enforces who may task whom.
+policy:
+  supervisor_may_task: worker      # own room only
+  worker_may_task: none            # workers report upward via results, they do not task
+  max_depth: 1                     # a worker cannot spawn agents (Task/Agent denied too)
