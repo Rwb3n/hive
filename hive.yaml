@@ -5,7 +5,7 @@
 # The room is the capability — an agent cannot widen its own scope, because
 # .claude/settings.json is generated from here on every provision.
 
-home: /home/you/hive
+home: /home/you/hive           # your WSL home; keep it OUT of /mnt/* (slow, exec-bit issues)
 
 api:
   host: 127.0.0.1
