@@ -109,7 +109,7 @@ function spawn(cfg, opts = {}) {
     '--cap-drop', 'ALL',
     // Network: on an `internal: true` network an agent has NO route out. Its only path
     // to the world is the egress proxy, which allows a measured allowlist and refuses
-    // everything else (docs/EGRESS.md). Verified against a raw shell: HTTPS, plain HTTP,
+    // everything else (docs/SECURITY.md). Verified against a raw shell: HTTPS, plain HTTP,
     // DNS and /dev/tcp all fail, while api.anthropic.com still works.
     ...(opts.network ? ['--network', opts.network] : ['--add-host', 'host.docker.internal:host-gateway']),
     ...(opts.proxy

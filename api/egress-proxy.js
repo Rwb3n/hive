@@ -1,6 +1,6 @@
 // Egress allowlist proxy — the last boundary.
 //
-// Containers give a room filesystem isolation (docs/CONTAINERS.md) but `hive-net` was a
+// Containers give a room filesystem isolation (docs/SECURITY.md) but `hive-net` was a
 // normal bridge, so a shell-enabled agent had full internet access. This closes that:
 // agents sit on an `internal: true` network with no route out, and reach the world only
 // through this proxy, which allows exactly the hosts on its allowlist.

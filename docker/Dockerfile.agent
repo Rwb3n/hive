@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code. Pinned: a new version can introduce a new first-run dialog that hangs an
-# unattended spawn (see docs/RUNTIME.md), so upgrades are a deliberate act.
+# unattended spawn (see docs/CLI-NOTES.md), so upgrades are a deliberate act.
 ARG CLAUDE_VERSION=2.1.274
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} \
     && npm cache clean --force
@@ -48,7 +48,7 @@ RUN set -eux; \
 
 # Onboarding state, baked in: without these the interactive TUI stops on the theme picker,
 # the login-method prompt, the folder-trust dialog, or the renderer upsell, and the pane
-# hangs forever with no human to answer (see docs/RUNTIME.md). The runner overwrites this
+# hangs forever with no human to answer (see docs/CLI-NOTES.md). The runner overwrites this
 # at container start with the real userID; these values only need to unblock the boot.
 COPY --chown=${UID}:${GID} docker/claude-state.json /agent-home/.claude.json
 

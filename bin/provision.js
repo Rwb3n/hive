@@ -2,7 +2,7 @@
 //
 // Creates each room + agent directory, generates .claude/settings.json from the role
 // template, and pre-registers EVERY room in ~/.claude.json in a single pass (N claude
-// processes plus this writer racing on that file will lose entries — see docs/RUNTIME.md).
+// processes plus this writer racing on that file will lose entries — see docs/CLI-NOTES.md).
 //
 // The room is the capability; the agent is a resident. Settings are GENERATED, never
 // hand-edited inside a room, so an agent cannot widen its own scope by rewriting them.
@@ -154,6 +154,17 @@ function provision(planPath, opts = {}) {
       ];
       for (const d of dirs) fs.mkdirSync(d, { recursive: true });
 
+      // A shell is only safe where the kernel enforces the boundary. In the tmux runtime
+      // `bash -c` walks straight out of the room (verified — docs/SECURITY.md), so refuse
+      // the combination at provision time rather than generating a room that looks scoped
+      // and is not.
+      if (agent.tools === 'shell' && (agent.runtime || 'tmux') !== 'docker') {
+        throw new Error(
+          `${name}: tools: shell requires runtime: docker — a shell escapes the room in the ` +
+            `tmux runtime. Set runtime: docker on the agent or its room, or use tools: file-only.`
+        );
+      }
+
       // --- settings.json, generated from the role template
       const tplName = (agent.tools === 'shell' ? 'agent-settings.shell.json' : 'agent-settings.file-only.json');
       const tplPath = path.join(templates, tplName);
@@ -243,7 +254,7 @@ function provision(planPath, opts = {}) {
 }
 
 // Suppress the first-run dialogs that would otherwise hang an unattended spawn:
-// theme, login method, folder trust, fullscreen upsell. See docs/RUNTIME.md.
+// theme, login method, folder trust, fullscreen upsell. See docs/CLI-NOTES.md.
 function preTrust(workspacePaths) {
   const f = path.join(os.homedir(), '.claude.json');
   let j = {};

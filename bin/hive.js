@@ -12,8 +12,14 @@
 //   hive tasks                     list tasks
 //   hive watch <agent>             prints the tmux attach command
 //   hive log [agent]               recent events
-//   hive denials                   boundary violations
+//   hive denials                   filesystem boundary violations
+//   hive cost                      per-agent tokens and real cost
+//   hive budget [set …]            caps, spend, headroom
+//   hive resume <agent>            un-pause an agent that hit its cap
+//   hive net up|down|status|log    egress: internal network + allowlist proxy
 //   hive reset                     wipe tasks/events (keeps agents)
+//
+// Reference: docs/OPERATIONS.md
 
 const { execFileSync, spawnSync, spawn } = require('child_process');
 const fs = require('fs');
@@ -61,7 +67,13 @@ cmds.provision = (args) => {
   const plan = args[0] || path.join(process.cwd(), 'hive.yaml');
   if (!fs.existsSync(plan)) die(`no plan at ${plan}`);
   const { provision } = require('./provision.js');
-  const res = provision(plan, { force: args.includes('--force') });
+  let res;
+  try {
+    res = provision(plan, { force: args.includes('--force') });
+  } catch (e) {
+    // A config error is the user's to fix — report it, do not dump a stack trace.
+    die(e.message);
+  }
   out(`provisioned ${res.agents.length} agents under ${res.home}`);
   // Register them with the API if it is up.
   const h = api('GET', '/health', undefined, true);
@@ -82,7 +94,23 @@ cmds.up = () => {
   if (!fs.existsSync(server)) die(`no server at ${server} — did you install the hive into ${HIVE_HOME}?`);
   tmux('kill-session', '-t', 'hive-api');
   tmux('new-session', '-d', '-s', 'hive-api', '-c', HIVE_HOME);
-  const cmd = `HIVE_HOME=${HIVE_HOME}${TOKEN ? ` HIVE_TOKEN=${TOKEN}` : ''} node ${server} 2>&1 | tee -a ${path.join(HIVE_HOME, 'api', 'server.log')}`;
+  // Pass through the host/port the CLI itself will talk to, derived from HIVE_API. Without
+  // this the server binds its own default while the CLI polls a different port and `up`
+  // times out with a misleading "api did not come up".
+  let apiHost = '127.0.0.1';
+  let apiPort = '8787';
+  try {
+    const u = new URL(API);
+    apiHost = u.hostname || apiHost;
+    apiPort = u.port || apiPort;
+  } catch (e) {}
+  const env = [
+    `HIVE_HOME=${HIVE_HOME}`,
+    `HIVE_PORT=${process.env.HIVE_PORT || apiPort}`,
+    `HIVE_HOST=${process.env.HIVE_HOST || apiHost}`,
+    TOKEN ? `HIVE_TOKEN=${TOKEN}` : '',
+  ].filter(Boolean).join(' ');
+  const cmd = `${env} node ${server} 2>&1 | tee -a ${path.join(HIVE_HOME, 'api', 'server.log')}`;
   tmux('send-keys', '-t', 'hive-api', cmd, 'Enter');
   // The OTLP collector: cost and token accounting. Agents export to it directly.
   const collector = path.join(HIVE_HOME, 'api', 'collector.js');
@@ -90,8 +118,8 @@ cmds.up = () => {
     tmux('kill-session', '-t', 'hive-otel');
     tmux('new-session', '-d', '-s', 'hive-otel', '-c', HIVE_HOME);
     tmux('send-keys', '-t', 'hive-otel',
-      `HIVE_HOME=${HIVE_HOME} node ${collector} 2>&1 | tee -a ${path.join(HIVE_HOME, 'api', 'collector.log')}`, 'Enter');
-    out('collector up at http://127.0.0.1:4318 (telemetry)');
+      `HIVE_HOME=${HIVE_HOME} HIVE_OTLP_PORT=${process.env.HIVE_OTLP_PORT || 4318} node ${collector} 2>&1 | tee -a ${path.join(HIVE_HOME, 'api', 'collector.log')}`, 'Enter');
+    out(`collector up at http://127.0.0.1:${process.env.HIVE_OTLP_PORT || 4318} (telemetry)`);
   }
   for (let i = 0; i < 30; i++) {
     if (api('GET', '/health', undefined, true).code === 200) return out(`api up at ${API}`);
@@ -233,7 +261,7 @@ total: $${s.totals.cost_usd}   (from claude_code.cost.usage — the CLI's own fi
 };
 
 // Network egress: an internal docker network with no route out, plus the allowlist
-// proxy as the only bridge. See docs/EGRESS.md.
+// proxy as the only bridge. See docs/SECURITY.md.
 cmds.net = (args) => {
   const sub = args[0] || 'status';
   const INTERNAL = process.env.HIVE_NET || 'hive-internal';

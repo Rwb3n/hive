@@ -118,7 +118,7 @@ function spawnAgent(cfg) {
   // the Windows PATH leaks into WSL through interop and breaks the shell line.
   const settings = path.join(DIR, '.claude', 'settings.json');
   // Telemetry: the CLI exports its own cost figure, so the hive never has to estimate.
-  // hive.agent/hive.room carry through as OTLP resource attributes (see docs/TELEMETRY.md).
+  // hive.agent/hive.room carry through as OTLP resource attributes (see docs/OPERATIONS.md).
   const OTLP = process.env.HIVE_OTLP || 'http://127.0.0.1:4318';
   const cmd = [
     'env',

@@ -1,41 +1,85 @@
-# Configuration
+# Configuration reference
 
-Everything about a hive lives in `hive.yaml`. `hive provision` reads it and generates the
-rest: room directories, per-agent `.claude/settings.json`, `agent.yaml`, `budget.json`, and
-the pre-trusted room entries in `~/.claude.json`.
-
-**Generated files are not hand-edited.** An agent cannot widen its own scope or raise its own
-cap, because both are regenerated from the plan on every provision.
-
-## Layers
+Everything lives in `hive.yaml`. `hive provision` reads it and generates the rest:
 
 ```
-defaults:  →  room:  →  agent:        most specific wins
+hive.yaml ──► rooms/<room>/<agent>/agent.yaml          identity + runtime limits
+          ──► rooms/<room>/<agent>/agent.md            role prompt (kept if edited)
+          ──► rooms/<room>/<agent>/.claude/settings.json   tools + hooks
+          ──► budget.json                              caps the API enforces
+          ──► egress-allow.json                        hosts the proxy allows
+          ──► ~/.claude.json                           pre-trusted room paths
 ```
+
+**Generated files are not hand-edited.** An agent cannot widen its own scope or raise its own cap
+by rewriting a file, because the file is overwritten from the plan on every provision. Only
+`agent.md` is preserved once it exists (pass `--force` to regenerate it).
+
+Some fields below are marked **(doc only)** — they describe intent but are not yet read by any
+code. They are listed so the file is not mistaken for being more configurable than it is.
+
+## Top level
+
+```yaml
+home: /home/you/hive       # where rooms, logs and the DB live. Keep this in the WSL
+                           # filesystem — /mnt/d is slow and has exec-bit problems.
+
+api:                       # (doc only) the server reads HIVE_PORT / HIVE_HOST env vars
+  host: 127.0.0.1
+  port: 8787
+  otlp_port: 4318
+```
+
+## `defaults` → `room` → `agent`
+
+Most specific wins.
 
 ```yaml
 defaults:
-  runtime: tmux             # tmux | docker
-  tools: file-only          # file-only | shell
-  model: ''                 # '' = the CLI default
-  memory: 2g                # docker runtime only
-  cpus: 2                   # docker runtime only
+  runtime: tmux            # tmux | docker
+  tools: file-only         # file-only | shell
+  model: ''                # '' = the CLI default
+  memory: 2g               # docker runtime only
+  cpus: 2                  # docker runtime only
   task_timeout_s: 900
-
-rooms:
-  - name: room-3
-    runtime: tmux           # overrides defaults for every agent in this room
-    agents:
-      - name: worker-1
-        role: worker        # worker | supervisor | manager | boss
-        tools: file-only    # overrides the room and defaults
 ```
 
-`tools: shell` selects `templates/agent-settings.shell.json` instead of the file-only
-template. **Only pair it with `runtime: docker`** — in the tmux runtime a shell escapes the
-room (see `FINDINGS.md`).
+| Field | Values | Meaning |
+|---|---|---|
+| `runtime` | `tmux`, `docker` | how the room comes alive. `docker` = kernel-enforced boundary |
+| `tools` | `file-only`, `shell` | selects the role template. `shell` **requires** `runtime: docker` |
+| `model` | any model id, or `''` | passed as `--model` |
+| `memory`, `cpus` | docker units | container limits; one worker cannot starve the building |
+| `task_timeout_s` | seconds | recorded in `agent.yaml`; the runner's own default is 900 |
 
-## Authority
+`provision` **refuses** `tools: shell` with `runtime: tmux` — a shell escapes the room in the
+tmux runtime, so the unsafe pairing cannot be configured by accident:
+
+```
+hive: w1: tools: shell requires runtime: docker — a shell escapes the room in the
+tmux runtime. Set runtime: docker on the agent or its room, or use tools: file-only.
+```
+
+## `rooms`
+
+```yaml
+rooms:
+  - name: room-3
+    runtime: tmux          # applies to every agent in this room
+    agents:
+      - name: supervisor
+        role: supervisor   # worker | supervisor | manager | boss
+        tools: file-only
+      - name: worker-1
+        role: worker
+      - name: worker-2
+        role: worker
+```
+
+`role` drives two things: the generated `agent.md` (a supervisor is told how to delegate), and
+the authority policy on who may task whom.
+
+## `policy` — **(doc only)**
 
 ```yaml
 policy:
@@ -44,96 +88,108 @@ policy:
   max_depth: 1
 ```
 
-Enforced by the API on `POST /tasks`, not by the transport. Verified: a worker may not task a
-peer or its own supervisor (403).
+The policy is **enforced**, but from `canTask()` in `api/server.js`, not from this block. The
+rules in force:
 
-## Budget
+| From | May task |
+|---|---|
+| `human` | anyone |
+| `supervisor` | workers **in its own room** |
+| `manager` | supervisors and workers |
+| `boss` | anyone |
+| `worker` | **nobody** (403) |
+
+To change the rules, edit `canTask()`. `HIVE_POLICY_OPEN=1` disables the check entirely — for
+debugging only.
+
+## `budget`
+
+Enforced by the API at task-claim time. Written to `budget.json`, which the API re-reads on every
+check, so `hive budget set` takes effect without a restart.
 
 ```yaml
 budget:
-  run_usd: 5.00             # whole hive, since the last `hive reset`
-  agent_usd: 2.00           # default per agent
-  task_usd: 1.00            # a single task (checked after it runs)
-  warn_at: 0.8              # log a warning at this fraction of a cap
-  on_exceed: pause          # pause | stop | warn
-  agents:
+  run_usd: 5.00            # whole hive, since the last `hive reset`
+  agent_usd: 2.00          # default per agent
+  task_usd: 1.00           # a single task (checked after it runs)
+  warn_at: 0.8             # log a warning at this fraction of a cap
+  on_exceed: pause         # pause | stop | warn
+  agents:                  # per-agent overrides
     supervisor:
-      agent_usd: 1.50       # per-agent override
+      agent_usd: 1.50
 ```
 
-`0` or omitted means **uncapped** for that dimension. No `budget` block at all means the hive
-is uncapped — verified by test, along with a corrupt `budget.json` falling back to uncapped
-rather than crashing.
+`0` or omitted = **uncapped** for that dimension. No `budget` block at all = uncapped hive. A
+corrupt `budget.json` also falls back to uncapped rather than crashing — both are tested.
 
-### Where it is enforced
-
-| Point | Behaviour |
+| `on_exceed` | Behaviour |
 |---|---|
-| `POST /agents/:name/claim` | **the hard gate** — 402, no work delivered, agent marked `paused` |
-| `POST /tasks` | courtesy — refuses to queue work that could never run |
-| `PATCH /tasks/:id` (done/failed) | per-task cap: cannot undo the spend, but pauses the agent so it is the last one |
+| `pause` | stop delivering work, keep the session alive. The runner logs the reason and the two commands that fix it, then polls slowly (15s) until the cap is raised. |
+| `stop` | as `pause`, and kill the agent's session. |
+| `warn` | log only, keep going. Not for unattended use; it exists so you can measure a workload before choosing caps. |
 
-Enforcement lives in the **API**, not the runner: a second runner or a direct `curl` cannot
-route around it. Verified — a raw `curl` claim returns 402.
+### Sizing a cap
 
-Costs come from the CLI's own telemetry (`claude_code.cost.usage`), so caps are real dollars.
-See `TELEMETRY.md`.
+An agent pays for its context before doing any work: roughly **$0.07–0.10 per turn** in a clean
+WSL config, more with skills and plugins loaded. **A cap below about $0.15 will pause an agent
+after one trivial task** — verified, a $0.06 cap paused a worker 3 seconds after a one-line file
+write.
 
-### Modes
+Cache *reads* are far cheaper than cache *creation*, so a long-lived session costs less per task
+than a fresh one. Weigh that against one-session-per-task, which is safer against safeguard
+poisoning (`CLI-NOTES.md`).
 
-- **`pause`** (default) — stop delivering work, keep the session alive. The runner logs the
-  reason and the two commands that fix it, then polls slowly (15s) until the cap is raised.
-- **`stop`** — as pause, and kill the agent's session.
-- **`warn`** — log only and keep going. Not recommended unattended; it exists so you can
-  measure a workload before choosing caps.
+## `egress`
 
-### Operating it
+```yaml
+egress:
+  enabled: true            # (doc only) — `hive net up`/`down` controls this
+  proxy_port: 3128         # (doc only) — HIVE_PROXY_PORT env var
+  network: hive-internal   # (doc only) — HIVE_NET env var
+  allow:                   # ← this is the part that is read
+    - api.anthropic.com
+    - statsig.anthropic.com
+    - '*.sentry.io'
+```
+
+Only `allow` is read, and it becomes `egress-allow.json`. Patterns are matched exactly, or as
+`*.suffix` — never as a substring, so `api.anthropic.com.evil.test` does not pass. An empty list
+refuses everything.
+
+Package registries are deliberately absent; see `SECURITY.md`.
+
+The hive's own service names are always reachable regardless of this list, so a configuration
+mistake degrades to "works" rather than silently killing telemetry.
+
+## Environment variables
+
+Config that is per-machine rather than per-building:
+
+| | |
+|---|---|
+| `HIVE_HOME` | the building root (default `~/hive`) |
+| `HIVE_API` | control-plane URL the CLI and runner use |
+| `HIVE_PORT`, `HIVE_HOST` | what the server binds |
+| `HIVE_TOKEN` | shared token; sent as `x-hive-token` |
+| `HIVE_OTLP` | telemetry endpoint given to agents |
+| `HIVE_OTLP_PORT`, `HIVE_OTLP_HOST` | what the collector binds |
+| `HIVE_PROXY_PORT`, `HIVE_NET` | egress proxy port, internal network name |
+| `HIVE_AGENT_IMAGE` | container image for the docker runtime |
+| `HIVE_POLL_MS`, `HIVE_BUDGET_POLL_MS`, `HIVE_BOOT_TIMEOUT_MS`, `HIVE_TASK_TIMEOUT_MS` | runner timings |
+| `HIVE_ROOM_ROOT`, `HIVE_LOG_DIR` | set **by** the runner for each agent; the guard reads them |
+
+`HIVE_ROOM_ROOT` must reach the hook process. Put it on the `claude` invocation itself, not in a
+preceding `export` — and note the guard denies *everything* when it is missing, so a broken
+launch presents as a totally inert agent. See `POSTMORTEMS.md`.
+
+## Validating a plan
 
 ```bash
-hive budget                                              # caps, spend, headroom
-hive budget set --run-usd 10                             # whole hive
-hive budget set --agent worker-1 --agent-usd 3           # one agent
-hive budget set --task-usd 0.5 --warn-at 0.9
-hive budget set --on-exceed warn
-hive resume worker-1                                     # un-pause after raising a cap
+node bin/hive.js provision hive.yaml     # errors are reported plainly, not as stack traces
+node test/yaml.test.js                   # the parser is pinned by tests
 ```
 
-```
-on_exceed: pause    warn at 80% of a cap
-
-HIVE TOTAL   $0.7523 of $5.00  [###.................] 15%
-
-AGENT              USED         CAP              TASK CAP
-worker-1          $0.0970   $2.00      [#...................]   5%  $1.00
-worker-2          $0.0973   $0.06      [####################] 162%  $1.00      OVER
-```
-
-Raising a cap does **not** auto-resume: `hive resume` is deliberate, and it refuses while the
-agent is still over. The runner then recovers on its own — verified, it logs
-`budget cleared — resuming` and takes the next task without a restart.
-
-Every transition is an event (`budget.paused`, `budget.resumed`, `budget.updated`,
-`budget.task_exceeded`), so `hive log` shows why an agent stopped.
-
-## ⚠️ Sizing caps: the context floor
-
-An agent pays for its context before doing any work — roughly **$0.07–0.10 per turn** in a
-clean WSL config, more with skills and plugins loaded. A cap below about $0.15 will pause an
-agent after a single trivial task. Verified: a $0.06 cap paused a worker 3 seconds after one
-one-line file write.
-
-Cache reads are much cheaper than cache creation, so a long-lived session is cheaper per task
-than a fresh one — weigh that against "one session per task", which is safer against
-safeguard poisoning (`RUNTIME.md`).
-
-## ⚠️ Concurrent writers
-
-The api server, the OTLP collector and the CLI all write `hive.db`. `api/db.js` sets
-`journal_mode=WAL` and `busy_timeout=5000` for this reason.
-
-This was a real bug: without the busy timeout the collector died with
-`database is locked`, telemetry stopped silently, and **every cap read $0.00 — budget
-enforcement was inert while appearing to work.** The collector now also retries a busy batch
-instead of exiting. Stress-tested with 12 concurrent writes from two processes: all landed.
-
-If you add another writer, keep it going through `api/db.js`.
+The YAML parser is a minimal subset (maps, lists, scalars, `#` comments, 2-space indent) — no
+anchors, multi-line strings or nested flow collections. It is deliberately small, but it is
+security-relevant: it produces the egress allowlist and the budget caps, so `test/yaml.test.js`
+pins the cases where a mis-parse would silently configure something other than what was written.
