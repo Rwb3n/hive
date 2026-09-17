@@ -271,11 +271,34 @@ function awaitResult(cfg, sinceEventId) {
 
 // A supervisor delegates by emitting `DELEGATE <worker>: <instruction>` lines.
 // The runner turns those into real tasks (the API still enforces who may task whom).
+// A planner or supervisor delegates by emitting lines in its reply. Accept the shapes a
+// model actually writes, not just the one the prompt asks for: the separator may be a
+// colon, an em/en dash or a hyphen, DELEGATE may be followed by a colon, the line may be
+// a markdown list item, and the name may be wrapped in backticks or bold.
+//
+// This was a real failure: a planner wrote `DELEGATE: worker-2 — Write writes.md…`, the
+// strict `DELEGATE <name>: ` pattern matched nothing, and two workers sat idle while the
+// task was recorded as done. The plan was correct; the parser was too narrow.
 function parseDelegations(text) {
   const out = [];
+  const seen = new Set();
   for (const line of String(text || '').split(/\r?\n/)) {
-    const m = line.match(/^\s*(?:[-*]\s*)?DELEGATE\s+([A-Za-z0-9._-]+)\s*:\s*(.+?)\s*$/);
-    if (m) out.push({ to: m[1], brief: m[2] });
+    // The separator must be explicit (':' or a dash). Allowing bare whitespace made
+    // `DELEGATE worker-1:` parse as agent 'worker' with brief '1:' — the name pattern
+    // stopped at the hyphen and whitespace matched the rest. A task for a nonexistent
+    // agent is worse than no task.
+    const m = line.match(
+      /^\s*(?:[-*+]\s*)?(?:\*\*)?DELEGATE(?:\*\*)?\s*:?\s+[`*_]*([A-Za-z0-9._-]+?)[`*_]*\s*(?::\s|:$|\s+[—–-]\s+)\s*(.*?)\s*$/i
+    );
+    if (!m) continue;
+    const to = m[1];
+    const brief = m[2].replace(/^[—–:-]\s*/, '').trim();
+    if (!brief) continue; // `DELEGATE worker-1:` with nothing after it is not a task
+    // One task per recipient per reply: a planner that restates a line should not queue
+    // the same work twice.
+    if (seen.has(to)) continue;
+    seen.add(to);
+    out.push({ to, brief });
   }
   return out;
 }
@@ -308,6 +331,9 @@ function run(agentDir, opts = {}) {
 
   let idleLoops = 0;
   let overBudget = false;
+  let tasksDone = 0;
+  // agent.yaml carries the class default; HIVE_SESSION can override for a one-off run.
+  const FRESH_SESSION = (process.env.HIVE_SESSION || cfg.session || 'persistent') === 'fresh';
   for (;;) {
     const claim = api('POST', `/agents/${name}/claim`);
 
@@ -336,6 +362,27 @@ function run(agentDir, opts = {}) {
     }
     idleLoops = 0;
     const task = claim.body;
+
+    // session: fresh — restart the agent before each task after the first.
+    //
+    // Two reasons it is worth the extra context floor. A safeguard flag poisons the rest
+    // of a session (docs/CLI-NOTES.md), so a persistent agent can be wedged by one badly
+    // worded task and take the whole queue with it. And a planner or reviewer carrying
+    // opinions from the previous task is a judgement contaminated by work it already did.
+    if (FRESH_SESSION && tasksDone > 0) {
+      log(name, `session: fresh — restarting before ${task.id}`);
+      const before = lastEventId();
+      spawnAgent(cfg);
+      const again = awaitReady(cfg, before);
+      if (!again.ok) {
+        api('PATCH', `/tasks/${task.id}`, { status: 'queued' }); // hand it back, do not lose it
+        api('PATCH', `/agents/${name}`, { status: 'failed' });
+        api('POST', '/events', { agent: name, evt: 'runner.respawn_failed', payload: { reason: again.blocked } });
+        log(name, `respawn failed: ${again.blocked} — task ${task.id} returned to the queue`);
+        return 1;
+      }
+      api('PATCH', `/agents/${name}`, { session_id: again.session_id || null });
+    }
 
     const mark = lastEventId();
     api('PATCH', `/tasks/${task.id}`, { status: 'running' });
@@ -366,8 +413,10 @@ function run(agentDir, opts = {}) {
     });
     api('PATCH', `/agents/${name}`, { status: 'idle' });
     log(name, `task ${task.id} done (${res.result.length} chars, ${artifacts.length} files)`);
+    tasksDone++;
 
-    // Supervisor delegation
+    // Delegation: a planner or supervisor emits DELEGATE lines; the API re-checks the
+    // authority policy, so a worker or reviewer emitting one gets refused.
     const dels = parseDelegations(res.result);
     for (const d of dels) {
       const t = api('POST', '/tasks', {

@@ -16,6 +16,8 @@ const SUITES = [
   { name: 'budget', expect: 27 },
   { name: 'egress', expect: 25 },
   { name: 'yaml', expect: 10 },
+  { name: 'classes', expect: 45 },
+  { name: 'delegation', expect: 21 },
 ];
 
 let pass = 0;

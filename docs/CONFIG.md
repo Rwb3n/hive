@@ -30,14 +30,65 @@ api:                       # (doc only) the server reads HIVE_PORT / HIVE_HOST e
   otlp_port: 4318
 ```
 
-## `defaults` → `room` → `agent`
+## Agent classes
 
-Most specific wins.
+A class bundles the four fields that must agree for a role to mean anything: what it may do
+(`tools`), whether it may delegate (`role`, enforced by the API), where it runs (`runtime`),
+and whether its session survives between tasks (`session`).
+
+```yaml
+rooms:
+  - name: room-3
+    agents:
+      - name: lead
+        class: planner
+      - name: worker-1
+        class: worker
+      - name: critic
+        class: reviewer
+```
+
+| Class | tools | role | session | May delegate |
+|---|---|---|---|---|
+| `planner` | read-only | planner | fresh | workers, builders, reviewers **in its own room** |
+| `worker` | file-only | worker | fresh | no |
+| `reviewer` | read-only | reviewer | fresh | no |
+| `supervisor` | file-only | supervisor | persistent | workers in its own room |
+| `builder` | shell (docker) | builder | fresh | no |
+
+The planner/worker/reviewer set has a property the supervisor/worker pair lacks, and it is
+structural rather than prompt-based:
+
+- a **planner** decides what to do and **cannot implement it** — `Write` and `Edit` are denied
+- a **reviewer** judges work and **cannot edit what it finds**, so a finding has to be written
+  down; it also may not task anyone, or it would just be a slower planner
+- a **worker** implements and may not create work for anyone
+
+Verified live: planner → two workers in parallel → reviewer, and the reviewer caught both
+defects seeded into a worker's output while correctly passing the one it had no evidence against.
+
+Override a built-in class, or define your own, with a `classes:` block:
+
+```yaml
+classes:
+  planner:
+    model: claude-opus-5        # keep the class, change one field
+  auditor:                      # a new class
+    role: reviewer              # role decides authority — pick an existing one
+    tools: read-only
+    session: fresh
+```
+
+## `classes` → `defaults` → `room` → `agent`
+
+Most specific wins. **A class beats `defaults`** — that is the point: a planner stays
+read-only even when `defaults` says `tools: file-only`.
 
 ```yaml
 defaults:
   runtime: tmux            # tmux | docker
-  tools: file-only         # file-only | shell
+  tools: file-only         # read-only | file-only | shell
+  session: persistent      # fresh | persistent
   model: ''                # '' = the CLI default
   memory: 2g               # docker runtime only
   cpus: 2                  # docker runtime only
@@ -47,7 +98,8 @@ defaults:
 | Field | Values | Meaning |
 |---|---|---|
 | `runtime` | `tmux`, `docker` | how the room comes alive. `docker` = kernel-enforced boundary |
-| `tools` | `file-only`, `shell` | selects the role template. `shell` **requires** `runtime: docker` |
+| `tools` | `read-only`, `file-only`, `shell` | selects the role template. `shell` **requires** `runtime: docker`; an unknown value is refused at provision time |
+| `session` | `fresh`, `persistent` | `fresh` restarts the agent between tasks: costlier (the context floor again) but a safeguard flag cannot poison a queue, and a planner or reviewer does not carry the last task's opinions into this one |
 | `model` | any model id, or `''` | passed as `--model` |
 | `memory`, `cpus` | docker units | container limits; one worker cannot starve the building |
 | `task_timeout_s` | seconds | recorded in `agent.yaml`; the runner's own default is 900 |
@@ -67,17 +119,16 @@ rooms:
   - name: room-3
     runtime: tmux          # applies to every agent in this room
     agents:
-      - name: supervisor
-        role: supervisor   # worker | supervisor | manager | boss
-        tools: file-only
+      - name: lead
+        class: planner     # a class implies its role; `role:` alone also works
       - name: worker-1
-        role: worker
+        class: worker
       - name: worker-2
-        role: worker
+        class: worker
 ```
 
-`role` drives two things: the generated `agent.md` (a supervisor is told how to delegate), and
-the authority policy on who may task whom.
+`role` drives two things: the generated `agent.md` (a planner is told how to delegate, a
+reviewer how to report), and the authority policy on who may task whom.
 
 ## `policy` — **(doc only)**
 
@@ -94,10 +145,14 @@ rules in force:
 | From | May task |
 |---|---|
 | `human` | anyone |
-| `supervisor` | workers **in its own room** |
-| `manager` | supervisors and workers |
+| `planner` | workers, builders, reviewers **in its own room** |
+| `supervisor` | workers, builders, reviewers **in its own room** |
+| `manager` | supervisors, planners, workers, builders, reviewers — across rooms |
 | `boss` | anyone |
-| `worker` | **nobody** (403) |
+| `worker`, `builder`, `reviewer` | **nobody** (403) |
+
+Pinned by `test/classes.test.js`, including the refusals: a reviewer may not order fixes, a
+worker may not task a peer or its planner, and nobody may task upward or sideways.
 
 To change the rules, edit `canTask()`. `HIVE_POLICY_OPEN=1` disables the check entirely — for
 debugging only.

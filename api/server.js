@@ -309,13 +309,33 @@ route('GET', '/status', () => {
   };
 });
 
-// Hierarchy policy: a supervisor may task workers in its own room; workers report
-// upward via messages/results, not by tasking. Loaded from agents table roles.
+// Authority policy: who may create work for whom. Enforced here rather than in the
+// transport, because the API is the one chokepoint every task passes (docs/ARCHITECTURE.md).
+//
+// The roles that may delegate are the ones that cannot implement:
+//   planner     read-only (Write/Edit denied) — decides what to do, cannot do it
+//   supervisor  file-only — decomposes and integrates within its own room
+//   manager     spans rooms
+// The roles that produce or judge work may not create it:
+//   worker      writes; may not task anyone, reports upward through results
+//   builder     writes and runs a shell in a container; same
+//   reviewer    read-only; judges work and cannot even edit what it finds, so a review
+//               has to be written down. It also may not task anyone — a reviewer that
+//               could order fixes would just be a slower planner.
+const PRODUCERS = ['worker', 'builder', 'reviewer'];
+const DELEGATORS = {
+  // A planner is room-scoped like a supervisor: it plans the work in front of it, and
+  // cannot reach into another room's agents. Crossing rooms is a manager's job.
+  planner: (to, from) => PRODUCERS.includes(to.role) && to.room === from.room,
+  supervisor: (to, from) => PRODUCERS.includes(to.role) && to.room === from.room,
+  manager: (to) => ['supervisor', 'planner', ...PRODUCERS].includes(to.role),
+  boss: () => true,
+};
+
 function canTask(from, to) {
-  if (from.role === 'supervisor') return to.role === 'worker' && to.room === from.room;
-  if (from.role === 'manager') return to.role === 'supervisor' || to.role === 'worker';
-  if (from.role === 'boss') return true;
-  return false; // workers may not create tasks
+  const rule = DELEGATORS[from.role];
+  if (!rule) return false; // worker, builder, reviewer: may not create tasks
+  return !!rule(to, from);
 }
 
 // ---------------------------------------------------------------- server

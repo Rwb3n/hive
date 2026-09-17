@@ -39,8 +39,8 @@ audited a claim against fresh test output, found an unverified assertion in this
 docs, and that led to a real symlink-traversal escape being found and fixed
 (`examples/run-1/`, `docs/POSTMORTEMS.md`).
 
-**91 tests** green on Windows and WSL Linux — `node test/all.js`: 29 boundary, 27 budget,
-25 egress, 10 config. Run them on both platforms before trusting a change; two boundary bugs
+**157 tests** green on Windows and WSL Linux — `node test/all.js`: 29 boundary, 27 budget, 25 egress,
+45 classes, 21 delegation, 10 config. Run them on both platforms before trusting a change; two boundary bugs
 were only visible on one of them.
 
 ## Quickstart
@@ -110,7 +110,7 @@ bin/
   signal.js            lifecycle relay: SessionStart / UserPromptSubmit / Stop
 docker/                agent image + compose stack
 templates/             role settings, generated into each agent's .claude/
-test/                  91 tests, both platforms
+test/                  157 tests, both platforms
 examples/run-1/        a real three-agent run: tasks, events, denials, output
 ```
 

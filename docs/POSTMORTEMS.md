@@ -220,9 +220,40 @@ line up.
 
 ---
 
+## 12. A too-strict DELEGATE parser silently dropped a whole plan
+
+**What happened.** The first live planner→worker run: the planner read the spec, split the work
+correctly, and emitted two delegation lines. Both workers sat idle and the task was recorded
+`done`. No error anywhere.
+
+The prompt asks for `DELEGATE <name>: <brief>`. The planner wrote:
+
+```
+DELEGATE: worker-2 — Write `writes.md` into your own workspace documenting …
+```
+
+A colon after `DELEGATE` and an em dash as the separator. The parser's regex matched neither, so
+`parseDelegations()` returned `[]` and the runner created no tasks. **The plan was correct; the
+parser was too narrow.**
+
+**Fix.** Accept the shapes a model actually writes: colon or dash or both, markdown list items,
+bold or backticked names, any case. Plus one task per recipient per reply, so a restated plan
+does not queue duplicate work.
+
+**And the fix had its own bug, caught by the test.** Allowing bare whitespace as a separator made
+`DELEGATE worker-1:` parse as agent `worker` with brief `1:` — the name pattern stopped at the
+hyphen. A task addressed to a nonexistent agent is worse than no task. The separator is now
+explicit.
+
+**Consequence.** `test/delegation.test.js` pins 21 cases, including the exact line that failed.
+Where a model's prose is a machine interface, be liberal about the shape and strict about the
+result — and test against what it really wrote, not what the prompt asked for.
+
+---
+
 ## The pattern
 
-Eight of these eleven had the same signature: **a safety mechanism silently doing nothing, while
+Nine of these twelve had the same signature: **a safety mechanism silently doing nothing, while
 appearing configured and correct.**
 
 - a crashed hook (looked enforced, wasn't)
@@ -233,6 +264,7 @@ appearing configured and correct.**
 - a missing DB column (tasks looked delivered)
 - a missing template (option looked supported)
 - a port never passed through (server healthy, CLI looking elsewhere)
+- a delegation parser that matched nothing (plan correct, task 'done', workers idle)
 
 None produced an error message. Each was caught only by checking that the mechanism **actually
 fired** — a denial in a log, a cost that moved, a transcript containing no forbidden tool.

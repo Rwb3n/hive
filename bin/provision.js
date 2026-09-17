@@ -114,6 +114,32 @@ function normalize(node) {
   return node;
 }
 
+// ---------------------------------------------------------------- agent classes
+//
+// A class bundles the four fields that have to agree for a role to mean anything:
+// what it may do (tools), whether it may delegate (role, enforced by the API), where
+// it runs (runtime), and whether its session survives between tasks (session).
+//
+// The point of the planner/reviewer pair is structural, not prompt-based:
+//   planner   decides what to do and CANNOT implement it — Write/Edit denied
+//   reviewer  judges work and CANNOT edit what it finds, so it must write down what is
+//             wrong; and it may not task anyone, or it would just be a slow planner
+//   worker    implements; may not create work for anyone
+//
+// `session: fresh` restarts the agent between tasks. Costlier (each task pays the
+// context floor again) but safer: a safeguard flag cannot poison a queue, and a planner
+// or reviewer should not carry opinions from the last task into this one.
+// `session: persistent` keeps the session, so cache reads make later tasks cheap.
+const CLASSES = {
+  planner: { role: 'planner', tools: 'read-only', runtime: 'tmux', session: 'fresh' },
+  worker: { role: 'worker', tools: 'file-only', runtime: 'tmux', session: 'fresh' },
+  reviewer: { role: 'reviewer', tools: 'read-only', runtime: 'tmux', session: 'fresh' },
+
+  // Available but not part of the planner/worker/reviewer set:
+  supervisor: { role: 'supervisor', tools: 'file-only', runtime: 'tmux', session: 'persistent' },
+  builder: { role: 'builder', tools: 'shell', runtime: 'docker', session: 'fresh', memory: '4g' },
+};
+
 // ---------------------------------------------------------------- provisioning
 
 function provision(planPath, opts = {}) {
@@ -134,8 +160,29 @@ function provision(planPath, opts = {}) {
     const agents = Array.isArray(room.agents) ? room.agents : [];
 
     for (const rawAgent of agents) {
-      // defaults -> room -> agent, most specific wins
-      const agent = Object.assign({}, plan.defaults || {}, { runtime: room.runtime || (plan.defaults || {}).runtime }, rawAgent);
+      // Resolution order, most specific last:
+      //   built-in class -> hive.yaml `classes:` override -> defaults -> room -> agent
+      // A class is a named bundle of (role, tools, runtime, session); it exists so a
+      // plan reads `class: planner` instead of restating four fields, and so the
+      // role/tools pairing that makes a class meaningful cannot drift apart.
+      const className = rawAgent.class || rawAgent.role || (plan.defaults || {}).class;
+      const builtin = CLASSES[className] || {};
+      const planClass = ((plan.classes || {})[className]) || {};
+      // `defaults` is the weakest layer: a class exists precisely to override it, so a
+      // planner stays read-only even when defaults say `tools: file-only`.
+      const agent = Object.assign(
+        {},
+        plan.defaults || {},
+        builtin,
+        planClass,
+        rawAgent
+      );
+      // Runtime: an explicit agent or class setting wins; otherwise the room decides.
+      if (!rawAgent.runtime && !planClass.runtime && !builtin.runtime) {
+        agent.runtime = room.runtime || (plan.defaults || {}).runtime || 'tmux';
+      }
+      // A class implies its role; an explicit `role:` still wins.
+      if (!rawAgent.role && (builtin.role || planClass.role)) agent.role = planClass.role || builtin.role;
       const name = agent.name;
       const role = agent.role || 'worker';
       if (!name) throw new Error(`room ${roomName} has an agent with no name`);
@@ -166,11 +213,29 @@ function provision(planPath, opts = {}) {
       }
 
       // --- settings.json, generated from the role template
-      const tplName = (agent.tools === 'shell' ? 'agent-settings.shell.json' : 'agent-settings.file-only.json');
+      const TOOL_TEMPLATES = {
+        'read-only': 'agent-settings.read-only.json',
+        'file-only': 'agent-settings.file-only.json',
+        shell: 'agent-settings.shell.json',
+      };
+      const tplName = TOOL_TEMPLATES[agent.tools];
+      if (!tplName) {
+        throw new Error(
+          `${name}: unknown tools: '${agent.tools}'. Use read-only, file-only or shell.`
+        );
+      }
       const tplPath = path.join(templates, tplName);
-      let settings = fs.readFileSync(tplPath, 'utf8').replace(/\{\{HIVE_BIN\}\}/g, HIVE_BIN);
-      const parsed = JSON.parse(settings);
+      // Parse FIRST, then substitute into the parsed values. Substituting into the raw
+      // text breaks on Windows, where HIVE_BIN contains backslashes: 'D:\temp\hive\bin'
+      // becomes an invalid JSON escape and the whole template fails to parse.
+      const parsed = JSON.parse(fs.readFileSync(tplPath, 'utf8'));
       delete parsed._comment;
+      const subst = (v) =>
+        typeof v === 'string' ? v.replace(/\{\{HIVE_BIN\}\}/g, HIVE_BIN)
+        : Array.isArray(v) ? v.map(subst)
+        : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, subst(x)]))
+        : v;
+      Object.assign(parsed, subst(parsed));
       fs.writeFileSync(path.join(agentDir, '.claude', 'settings.json'), JSON.stringify(parsed, null, 2) + '\n');
 
       // --- agent.md: the role prompt the agent actually reads
@@ -193,6 +258,8 @@ function provision(planPath, opts = {}) {
           `log_dir: ${path.join(HIVE_HOME, 'logs', name)}`,
           `tmux_session: hive-${name}`,
           `tools: ${agent.tools || 'file-only'}`,
+          `session: ${agent.session || 'persistent'}`,
+          `class: ${className || role}`,
           `memory: ${agent.memory || '2g'}`,
           `cpus: ${agent.cpus || 2}`,
           `task_timeout_s: ${agent.task_timeout_s || 900}`,
@@ -310,6 +377,66 @@ When you are told a task is ready:
 
 Your final message is captured as the task result — make it a useful report, not just "done".
 `;
+
+  if (role === 'planner') {
+    return (
+      common +
+      `
+## Planning
+
+**You cannot write or edit files.** \`Write\` and \`Edit\` are not available to you — that is
+deliberate, not an oversight. Your job is to decide what should be done; someone else does it.
+Do not try to work around this, and do not describe a plan as though you had implemented it.
+
+Read what is in your room, then emit the work as delegation lines — one per line, exactly:
+
+    DELEGATE <agent-name>: <a complete, self-contained instruction>
+
+Each instruction is all its recipient will get: it cannot see your reasoning, the other
+instructions, or anything outside its own room. So name the file to write, state the sources it
+may rely on, and say explicitly what it should NOT cover so two agents do not do the same work.
+
+Before those lines, explain in a sentence or two how you split the work and why. That reasoning
+is the part a human reads.
+
+Where the same facts could land in more than one piece, decide who owns them and say so. Where
+the task is ambiguous, choose an interpretation, state it, and plan against it rather than
+asking — nobody is waiting to answer.
+`
+    );
+  }
+
+  if (role === 'reviewer') {
+    return (
+      common +
+      `
+## Reviewing
+
+**You cannot write or edit files.** \`Write\` and \`Edit\` are not available to you. You cannot
+fix what you find, which is the point: a review that silently repairs things teaches nobody, and
+a finding you cannot act on is one you have to state precisely.
+
+What you are given is in \`./input/\`. Read it, and check it against whatever evidence you were
+also given — test output, a specification, the source it claims to describe.
+
+Report findings, most important first. For each one:
+
+- **what** is wrong, in one sentence
+- **where** — file and line or heading, so it can be found
+- **why** it is wrong: quote the claim and quote the evidence that contradicts it
+- **how confident** you are, and what would settle it if you are not sure
+
+Distinguish three things carefully, because they are not the same:
+
+- a claim that is **contradicted** by the evidence you hold
+- a claim that is **unsupported** — no evidence either way. Say "not covered", not "wrong".
+- a claim you simply **cannot check** with what you were given
+
+Do not invent problems to look thorough. "I found nothing I can substantiate" is a complete and
+useful review. Do not soften a real finding either — if something is wrong, say so plainly.
+`
+    );
+  }
 
   if (role === 'supervisor') {
     return (
