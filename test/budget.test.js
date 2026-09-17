@@ -1,3 +1,11 @@
+// Copyright 2026 Ruben <lab@mindunder.dev>
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0. See LICENSE and NOTICE at the repo
+// root. Distributed WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. This project
+// implements agent isolation boundaries and documents what each does NOT cover —
+// read docs/SECURITY.md before relying on it.
+
 // Unit tests for api/budget.js — the decision table for refusing work.
 // Run: node test/budget.test.js
 const { DatabaseSync } = require('node:sqlite');

@@ -1,3 +1,11 @@
+// Copyright 2026 Ruben <lab@mindunder.dev>
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0. See LICENSE and NOTICE at the repo
+// root. Distributed WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. This project
+// implements agent isolation boundaries and documents what each does NOT cover —
+// read docs/SECURITY.md before relying on it.
+
 // Lifecycle signal relay: SessionStart / UserPromptSubmit / Stop -> the hive's log dir.
 // Installed into each agent's generated settings; this is the runner's INPUT side, replacing
 // tmux screen-scraping. Verified working in interactive mode (claude 2.1.274).

@@ -6,6 +6,7 @@
 [![node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](#requirements)
 [![boundaries](https://img.shields.io/badge/boundaries-filesystem%20%C2%B7%20capability%20%C2%B7%20network%20%C2%B7%20spend-informational)](docs/SECURITY.md)
 [![runtimes](https://img.shields.io/badge/runtimes-tmux%20%7C%20docker-0db7ed?logo=docker&logoColor=white)](docs/ARCHITECTURE.md#runtimes)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 A building of scoped Claude Code agents. Each agent is a live `claude` process confined to its
 own room, coordinated through a small HTTP control plane.
@@ -143,6 +144,20 @@ templates/             role settings, generated into each agent's .claude/
 test/                  198 tests, both platforms
 examples/run-1/        a real three-agent run: tasks, events, denials, output
 ```
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+**Read [`docs/SECURITY.md`](docs/SECURITY.md) before relying on any boundary here.** This
+software implements agent isolation and documents, deliberately, what each boundary does *not*
+cover: a shell in the tmux runtime is not contained, traffic to the one allowlisted host is not
+contained, and the hook boundary is protection against mistakes and drift rather than against a
+determined or prompt-injected agent. Those limits are findings, not disclaimers — but the
+"AS IS" basis applies with full force. **This is not a security product.**
+
+Claude Code itself is licensed separately by Anthropic and is not covered by this license.
+Nothing here is affiliated with or endorsed by Anthropic.
 
 ## Requirements
 
