@@ -1,0 +1,139 @@
+name: tests
+
+# Why a two-platform matrix: two boundary bugs in this project were visible on only one
+# OS. Case-folding let `/Room/x` slip past a `/room` guard on case-sensitive Linux, and a
+# Windows-style absolute path (`C:/…`) is NOT absolute on Linux, so an escape attempt was
+# resolved *inside* the room. Running one platform would have shipped both.
+#
+# The suites need no external binaries, no network and no credentials — they unit-test the
+# boundary logic, the budget decision table, the egress matcher and the config parser.
+# Nothing here runs a real agent or spends money.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # a failure on one OS must not hide the other's result
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          # No package.json and no dependencies — nothing to cache or install.
+
+      - name: Environment
+        run: node -e "console.log(process.platform, process.arch, 'node', process.versions.node)"
+
+      # node:sqlite is required by the control plane and arrived in Node 22. Fail early
+      # and clearly rather than inside a suite.
+      - name: Check node:sqlite is available
+        run: node -e "require('node:sqlite'); console.log('node:sqlite ok')"
+
+      # Windows file symlinks need Developer Mode or elevation. Report up front whether
+      # this runner can create them, so a later SKIP is not a surprise. test/all.js fails
+      # the build if the cases are skipped, so this is diagnosis, not a gate.
+      - name: Can this runner create symlinks?
+        shell: bash
+        run: |
+          node -e "
+          const fs=require('fs'),os=require('os'),path=require('path');
+          const d=fs.mkdtempSync(path.join(os.tmpdir(),'symprobe-'));
+          const t=(k,f)=>{try{f();console.log('  '+k+': ok')}catch(e){console.log('  '+k+': FAILED ('+(e.code||e.message)+')')}};
+          t('dir junction', ()=>fs.symlinkSync(d, path.join(d,'l1'), 'junction'));
+          fs.writeFileSync(path.join(d,'f'),'x');
+          t('file symlink', ()=>fs.symlinkSync(path.join(d,'f'), path.join(d,'l2'), 'file'));
+          fs.rmSync(d,{recursive:true,force:true});
+          "
+
+      # The real gate. Asserts an expected case count per suite, so a boundary test that
+      # silently skips fails the build instead of reporting green.
+      - name: Run all suites
+        run: node test/all.js
+
+      # The config parser produces the egress allowlist and the budget caps, so a
+      # mis-parse configures something other than what was written. Prove the shipped
+      # hive.yaml still parses to the values it appears to declare.
+      - name: Validate the shipped hive.yaml
+        run: |
+          node -e "
+          const {parseYaml}=require('./bin/provision.js');
+          const p=parseYaml(require('fs').readFileSync('hive.yaml','utf8'));
+          const fail=(m)=>{console.error('hive.yaml: '+m);process.exit(1)};
+          if(!Array.isArray(p.rooms)||!p.rooms.length) fail('no rooms parsed');
+          if(!p.rooms[0].agents.length) fail('no agents parsed');
+          if(!p.budget||!(p.budget.run_usd>0)) fail('budget.run_usd missing');
+          if(!Array.isArray(p.egress.allow)) fail('egress.allow is not a list');
+          if(!p.egress.allow.every(x=>typeof x==='string')) fail('an allowlist entry parsed as a map (the inline-comment bug)');
+          if(!p.egress.allow.includes('api.anthropic.com')) fail('api.anthropic.com missing from the allowlist');
+          console.log('hive.yaml ok:', p.rooms[0].agents.length, 'agents,', p.egress.allow.length, 'allowlist entries');
+          "
+
+      - name: Check generated role templates are valid JSON
+        run: |
+          node -e "
+          for (const f of ['file-only','shell']) {
+            const t = require('./templates/agent-settings.'+f+'.json');
+            if (!t.permissions || !Array.isArray(t.permissions.deny)) { console.error(f+': no deny list'); process.exit(1); }
+            console.log(f+': '+t.permissions.deny.length+' denied, '+t.permissions.allow.length+' allowed');
+          }
+          "
+
+      # A file-only role must never allow a tool that can execute commands. This is the
+      # regression test for the ToolSearch -> Monitor bypass: denying Bash alone was not
+      # enough, and a CLI upgrade can ship a new execution-capable tool enabled.
+      - name: Assert the file-only role denies every known execution path
+        run: |
+          node -e "
+          const t = require('./templates/agent-settings.file-only.json');
+          const must = ['Bash','PowerShell','Monitor','ToolSearch','Task','Agent','Workflow','Skill','WebFetch','WebSearch'];
+          const deny = new Set(t.permissions.deny);
+          const missing = must.filter(m => !deny.has(m));
+          if (missing.length) { console.error('file-only template does not deny: ' + missing.join(', ')); process.exit(1); }
+          const badAllow = t.permissions.allow.filter(a => must.includes(a));
+          if (badAllow.length) { console.error('file-only template ALLOWS: ' + badAllow.join(', ')); process.exit(1); }
+          console.log('file-only role: all ' + must.length + ' execution paths denied');
+          "
+
+  syntax:
+    name: syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: node --check every source file
+        run: |
+          fail=0
+          for f in api/*.js bin/*.js test/*.js; do
+            node --check "$f" || { echo "SYNTAX ERROR: $f"; fail=1; }
+          done
+          exit $fail
+      - name: Docs must not reference deleted files
+        run: |
+          # The docs were consolidated; a pointer to a removed file is worse than none.
+          if grep -rn "RUNTIME\.md\|FINDINGS\.md\|CONTAINERS\.md\|EGRESS\.md\|TELEMETRY\.md" \
+               README.md docs/ api/ bin/ templates/ docker/ hive.yaml 2>/dev/null \
+             | grep -v "POSTMORTEMS.md:"; then
+            echo "^ dangling reference to a consolidated doc"
+            exit 1
+          fi
+          echo "no dangling doc references"
