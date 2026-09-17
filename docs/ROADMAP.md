@@ -85,19 +85,69 @@ still hold.
 **Today.** `class:` works on an agent and is ignored on a room. `ARCHITECTURE.md` describes a
 room as "a directory plus a capability set", but the only room-level dial is `runtime`.
 
-The two worth building:
+A room class sets four things: **writable scope, readable inputs, network reach, and lifetime.**
+Those are the dials; a class that does not move one of them is just a name.
 
-- **`worktree`** — the room *is* a git worktree of a shared bare repo; each agent gets a branch
-  and the integrator merges. This changes the unit of work from *files* to *commits*, which makes
-  "did this actually work" answerable by `git diff` and `npm test` rather than by reading prose.
-  It is the single biggest change in usefulness on this list.
-- **`readingroom`** — inputs mounted read-only, the only writable path is `outbox/`. The natural
-  home for a reviewer, and it needs the guard to grow a read/write distinction (it currently
-  treats both the same).
+| Class | What it changes | Cost |
+|---|---|---|
+| **`workroom`** | the default, shipping today: N agents, each with its own `workspace/`, inputs copied in | — |
+| **`worktree`** | the room **is** a git worktree of a shared bare repo; each agent gets a branch, an integrator merges | days |
+| **`readingroom`** | inputs mounted read-only; the only writable path is `outbox/` | a day |
+| **`sealed`** | egress allowlist emptied to the API alone, no shared inputs, outputs collected by the runner | a day |
+| **`buildroom`** | containerised, toolchain in the image, tmpfs scratch discarded per task | half a day |
+| **`airlock`** | no agent lives here; the runner uses it to move artifacts between rooms under policy | half a day |
 
-**Cost.** `worktree` is a few days: git plumbing, branch-per-agent, merge handling, and the
-failure modes (conflicts, dirty trees) are where the work actually is. `readingroom` is a day,
-mostly in the guard and its tests.
+**`worktree` is the one that matters most.** It changes the unit of work from *files* to
+*commits*, which makes "did this actually work" answerable by `git diff` and `npm test` instead
+of by reading prose. It is also where the real work is: branch-per-agent, merge handling, and the
+failure modes (conflicts, dirty trees, a worker that commits nothing).
+
+**`readingroom`** is the natural home for a reviewer, and it needs the guard to grow a
+**read/write distinction** — it currently treats both the same, so "may read, may not write"
+cannot be expressed per-path. That single change also unlocks a legitimate shared-input directory
+without the hole a writable shared room would open.
+
+**`sealed`** is the one to reach for when the material is sensitive rather than the code
+untrusted: everything the agent needs copied in, nothing shared, nothing reachable. Cheap,
+because the mechanisms (per-room egress allowlist, runner-collected outputs) already exist.
+
+**`airlock`** is worth naming because it is the honest answer to "how does work get from room A
+to room B" — a room nothing lives in, that only the runner writes to, so no agent ever writes
+into another agent's room. It is what roadmap item 1 (artifact hand-off) should probably
+materialise *as*, rather than copying directly between workspaces.
+
+**Not worth building:** a `darkroom` with no egress at all. A live agent cannot reach the API
+without egress, so it would be a room nothing can run in. `sealed` is the realistic version.
+
+### 4b. More agent classes
+
+**Today.** Five ship: `planner`, `worker`, `reviewer`, `supervisor`, `builder`. A class is
+meaningful only if it moves one of **tools · authority · session · runtime** — otherwise it is a
+prompt with a label, which is the least durable thing in this system.
+
+Candidates that genuinely differ:
+
+| Class | tools | authority | session | Why it is a new shape |
+|---|---|---|---|---|
+| **`archivist`** | file-only, writes `outbox/` only | none | persistent | the only role where a long-lived accumulating context is the *point*; distils memory (item 8c) |
+| **`integrator`** | file-only (or shell in a worktree room) | none | fresh | merges N workers' branches and resolves conflicts. Distinct from a supervisor: it integrates and does **not** delegate |
+| **`auditor`** | read-only | none | fresh | a reviewer pointed at the **hive itself** — denials, costs, the fact store — rather than at work products. Same capability, different subject, and the right auditor for item 8 |
+| **`negotiator`** | read-only | may task **peers** | fresh | the only class that would need a new authority edge: two planners reconciling overlapping plans. **Speculative — do not build without a concrete case** |
+
+And two that sound like classes but are not:
+
+- **`tester`** — that is `builder` with a different prompt. Same tools, same authority, same
+  runtime. Adding it would be exactly the labelling this list warns against.
+- **`researcher`** — it would need `WebFetch`/`WebSearch`, which the egress design deliberately
+  denies (`SECURITY.md`). A room with a wider allowlist plus an existing class is the honest
+  shape, not a new class with a hole in it.
+
+**Cost.** `archivist` and `auditor` are half a day each — a class-table entry, a role prompt, and
+tests that the capability really is restricted. `integrator` is meaningless before `worktree`
+exists, so it is bound to item 4. `negotiator` needs a reason first.
+
+**The rule for adding any of these:** name the dial it moves. If the answer is "none, but the
+prompt is different", write a task template instead of a class.
 
 ### 5. Goal priority in claim order
 
@@ -254,8 +304,14 @@ cannot. Pure convenience — worth doing only once the pipeline above is closed.
 - **A memory room.** Memory is delivered to an agent as an input, not somewhere it goes. A
   shared writable room would need a hole in the scope guard and would reintroduce the collisions
   per-agent workspaces prevent. See item 8.
-- **More roles.** `manager` and `boss` exist in the authority table and are ceremony until they
-  have something to decide a planner cannot. Adding org-chart depth costs tokens and latency and
+- **A `tester` or `researcher` class.** `tester` is `builder` with a different prompt — same
+  tools, authority, session and runtime, so it moves no dial. `researcher` would need the web
+  tools the egress design denies; a room with a wider allowlist plus an existing class is the
+  honest shape. See item 4b.
+- **A `darkroom` with no egress.** A live agent cannot reach the API without egress, so it would
+  be a room nothing runs in. `sealed` (item 4) is the realistic version.
+- **More org-chart roles.** `manager` and `boss` exist in the authority table and are ceremony
+  until they have something to decide a planner cannot. Adding org-chart depth costs tokens and latency and
   buys nothing; parallelism at the leaves is where the value is.
 - **A GUI.** The CLI plus `tmux attach` is the right interface for watching agents work.
 - **Prompt-engineering the roles.** The classes work because capability and authority are
