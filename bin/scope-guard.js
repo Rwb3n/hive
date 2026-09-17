@@ -61,6 +61,41 @@ function logDenial(p, attempted, resolved) {
   }
 }
 
+// Resolve a path the way the FILESYSTEM will, not the way string math does.
+//
+// `path.resolve` collapses '..' lexically BEFORE any symlink is followed, which is a real
+// escape: if room/link -> /outside, then room/link/../x resolves lexically to room/x
+// (in-room, allowed) but on disk means /outside/../x = /x. So walk the path one segment at
+// a time, calling realpath as we go, and let each '..' apply to the REAL parent.
+function resolveHonestly(p) {
+  // NOTE: do NOT path.resolve() here. It collapses '..' lexically, which is the very
+  // thing this function exists to prevent — it would hand the loop a path with the
+  // traversal already (wrongly) applied.
+  const abs = path.isAbsolute(p) ? p : path.join(process.cwd(), p);
+  const { root } = path.parse(abs);
+  const parts = abs.slice(root.length).split(/[\\/]+/).filter((s) => s && s !== '.');
+  let cur = root;
+  for (const seg of parts) {
+    if (seg === '..') {
+      // Ascend from the resolved location, so a symlinked dir cannot hide the real parent.
+      try {
+        cur = fs.realpathSync(cur);
+      } catch (e) {
+        /* not yet on disk: lexical parent is the best available */
+      }
+      cur = path.dirname(cur);
+      continue;
+    }
+    cur = path.join(cur, seg);
+    try {
+      cur = fs.realpathSync(cur); // follows a link the moment we step onto it
+    } catch (e) {
+      /* tail does not exist yet (a file about to be created) — keep the lexical path */
+    }
+  }
+  return cur;
+}
+
 let raw = '';
 process.stdin.on('data', (c) => (raw += c));
 process.stdin.on('end', () => {
@@ -79,16 +114,16 @@ process.stdin.on('end', () => {
   // seen on Linux) is NOT relative — treating it as relative would resolve it inside the room and
   // silently allow it. Refuse outright: nothing legitimate in a room uses foreign absolute paths.
   const foreignAbsolute = (s) => /^[A-Za-z]:[\\/]/.test(s) || s.startsWith('\\\\') || s.startsWith('//');
+  // Compare only. Inputs here are ALREADY fully resolved by resolveHonestly, so this
+  // must not call path.resolve again — that would re-collapse any '..' and undo the work.
   const norm = (s) => {
-    const q = (path.isAbsolute(s) ? path.resolve(s) : path.resolve(base, s))
-      .split(path.sep)
-      .join('/');
+    const q = String(s).split(path.sep).join('/').replace(/\/+$/, '');
     return CASE_INSENSITIVE ? q.toLowerCase() : q;
   };
 
   // Resolve the room itself too: if ROOM is given via a symlink or 8.3 short path,
   // a realpath'd candidate would never match a lexical room prefix.
-  let roomReal = ROOM;
+  let roomReal;
   try {
     roomReal = fs.realpathSync(ROOM);
   } catch (e) {
@@ -115,21 +150,12 @@ process.stdin.on('end', () => {
         `scope-guard: ${p.tool_name} blocked. Path "${c}" is not a valid path on this platform. Use paths inside your room (${ROOM}).`
       );
     }
-    let real = c;
-    try {
-      // resolve symlinks on the nearest existing ancestor to defeat link escapes
-      let probe = path.isAbsolute(c) ? path.resolve(c) : path.resolve(base, c);
-      let tail = [];
-      while (!fs.existsSync(probe)) {
-        tail.unshift(path.basename(probe));
-        const up = path.dirname(probe);
-        if (up === probe) break;
-        probe = up;
-      }
-      real = path.join(fs.realpathSync(probe), ...tail);
-    } catch (e) {
-      /* fall back to the lexical path */
-    }
+    // Join by string, not path.join: join would collapse '..' lexically before
+    // resolveHonestly can apply it to the REAL (symlink-resolved) parent.
+    const candidateAbs = path.isAbsolute(c)
+      ? c
+      : String(base).replace(/[\/]+$/, '') + path.sep + c;
+    const real = resolveHonestly(candidateAbs);
     if (!inRoom(real)) {
       logDenial(p, c, real);
       deny(`scope-guard: ${p.tool_name} blocked. Path "${c}" is outside your room (${ROOM}). Stay within your room.`);

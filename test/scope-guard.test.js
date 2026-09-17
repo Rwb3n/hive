@@ -65,6 +65,38 @@ const cases = [
   ['nonexistent room root', W(path.join(ROOM, 'ok.txt')), { HIVE_ROOM_ROOT: path.join(BASE, 'no-such-room') }, 'deny'],
 ];
 
+// Symlink escapes. The guard realpath()s the nearest existing ancestor precisely to
+// defeat these, but the behaviour was previously UNTESTED while the docs claimed it was
+// enforced — caught by a hive supervisor auditing a claim against the test output.
+// Creating symlinks can require privileges on Windows, so skip cleanly if it fails.
+{
+  const linkInRoom = path.join(ROOM, 'escape-link');       // room/escape-link -> BASE
+  const linkToFile = path.join(ROOM, 'cred-link');         // room/cred-link  -> BASE/secret.txt
+  const secret = path.join(BASE, 'secret.txt');
+  let symlinksWork = false;
+  try {
+    fs.writeFileSync(secret, 'sensitive\n');
+    fs.symlinkSync(BASE, linkInRoom, 'junction');
+    fs.symlinkSync(secret, linkToFile, 'file');
+    symlinksWork = true;
+  } catch (e) {
+    console.log(`SKIP  symlink cases (cannot create symlinks here: ${String(e.code || e.message).slice(0, 30)})`);
+  }
+  if (symlinksWork) {
+    // A path that LOOKS in-room but resolves outside it must be denied.
+    cases.push(['symlink dir out of room', W(path.join(linkInRoom, 'pwned.txt')), {}, 'deny']);
+    cases.push(['symlink to file out of room', R(linkToFile), {}, 'deny']);
+    // Nested traversal through the link is the same escape, spelled differently.
+    // Build this by STRING concatenation, not path.join — join collapses '..' lexically,
+    // which would hand the guard an already-in-room path and test nothing. (The first
+    // version of this test did exactly that and "passed" against a guard that was blind.)
+    const traversal = linkInRoom.split(path.sep).join('/') + '/../pwned2.txt';
+    cases.push(['symlink + traversal', W(traversal), {}, 'deny']);
+    // Same attack, relative to the agent's cwd.
+    cases.push(['symlink + traversal (relative)', { tool_name: 'Write', tool_input: { file_path: 'escape-link/../pwned3.txt' }, cwd: ROOM }, {}, 'deny']);
+  }
+}
+
 // Case sensitivity: on Linux, /Room is a DIFFERENT directory from /room and must be
 // denied; on Windows/macOS it is the same directory and must be allowed.
 // (Regression test for a case-folding escape on case-sensitive filesystems.)

@@ -24,7 +24,9 @@ const HIVE_HOME = process.env.HIVE_HOME || path.join(os.homedir(), 'hive');
 const API = process.env.HIVE_API || 'http://127.0.0.1:8787';
 const TOKEN = process.env.HIVE_TOKEN || '';
 
-function api(method, route, body) {
+// `soft: true` returns {code:0} instead of exiting when the server is unreachable —
+// used by `up` to probe whether the api is already running.
+function api(method, route, body, soft) {
   const args = ['-s', '-X', method, `${API}${route}`, '-H', 'content-type: application/json'];
   if (TOKEN) args.push('-H', `x-hive-token: ${TOKEN}`);
   if (body !== undefined) args.push('-d', JSON.stringify(body));
@@ -33,6 +35,7 @@ function api(method, route, body) {
   try {
     out = execFileSync('curl', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
   } catch (e) {
+    if (soft) return { code: 0, body: null };
     die(`cannot reach the api at ${API} — is it up? (hive up)`);
   }
   const i = out.lastIndexOf('\n');
@@ -61,7 +64,7 @@ cmds.provision = (args) => {
   const res = provision(plan, { force: args.includes('--force') });
   out(`provisioned ${res.agents.length} agents under ${res.home}`);
   // Register them with the API if it is up.
-  const h = api('GET', '/health');
+  const h = api('GET', '/health', undefined, true);
   if (h.code === 200) {
     for (const a of res.agents) {
       api('POST', '/agents', a);
@@ -74,7 +77,7 @@ cmds.provision = (args) => {
 };
 
 cmds.up = () => {
-  if (api('GET', '/health').code === 200) return out('api already up');
+  if (api('GET', '/health', undefined, true).code === 200) return out('api already up');
   const server = path.join(HIVE_HOME, 'api', 'server.js');
   if (!fs.existsSync(server)) die(`no server at ${server} — did you install the hive into ${HIVE_HOME}?`);
   tmux('kill-session', '-t', 'hive-api');
@@ -82,7 +85,7 @@ cmds.up = () => {
   const cmd = `HIVE_HOME=${HIVE_HOME}${TOKEN ? ` HIVE_TOKEN=${TOKEN}` : ''} node ${server} 2>&1 | tee -a ${path.join(HIVE_HOME, 'api', 'server.log')}`;
   tmux('send-keys', '-t', 'hive-api', cmd, 'Enter');
   for (let i = 0; i < 30; i++) {
-    if (api('GET', '/health').code === 200) return out(`api up at ${API}`);
+    if (api('GET', '/health', undefined, true).code === 200) return out(`api up at ${API}`);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
   }
   die('api did not come up — check `tmux attach -t hive-api`');

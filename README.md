@@ -3,9 +3,11 @@
 A building of scoped Claude Code agents. Each agent is a live `claude` process confined to
 its own directory, coordinated through a small HTTP control plane.
 
-**Status: working.** A supervisor decomposed a task, delegated to two workers, and they ran
-in parallel and produced correct output — 102 seconds, three agents, boundary enforced
-throughout. See `examples/run-1/`.
+**Status: working.** A supervisor decomposed a task, delegated to two workers who ran in
+parallel, then integrated their output into one document — editing it, not pasting it. In
+the process it audited a claim against fresh test output, found an unverified assertion in
+this project's own docs, and that led to a real symlink-traversal escape being found and
+fixed. See `examples/run-1/`.
 
 ```
 hive/
@@ -21,7 +23,7 @@ hive/
     scope-guard.js       the room boundary (PreToolUse hook)
     signal.js            lifecycle relay (SessionStart/UserPromptSubmit/Stop)
   templates/             role settings, generated into each agent's .claude/
-  test/                  25 boundary tests, green on Windows and Linux
+  test/                  29 boundary tests, green on Windows and Linux
   docs/
     FINDINGS.md          verified CLI behaviour — read before changing anything
     RUNTIME.md           how to launch an agent unattended, every trap documented
@@ -89,11 +91,12 @@ runner turns those into tasks, and the API still checks the policy. Workers cann
 
 | | |
 |---|---|
-| Writes/reads/Glob/Grep outside the room | blocked (25/25 tests, both platforms) |
+| Writes/reads/Glob/Grep outside the room | blocked (29/29 tests, both platforms) |
 | Reads of `~/.claude/.credentials.json` | blocked |
 | MCP servers (Gmail, Drive, …) | none loaded (`--strict-mcp-config`) |
 | Shell execution for file-only roles | removed from the session (21-entry deny list) |
 | Worker tasking a peer or its supervisor | 403 from the API |
+| Symlink escapes, incl. symlink + `..` traversal | blocked |
 | Guard crash / missing env / bad payload | fails **closed** |
 | Audit log | written outside the room; the agent cannot edit it |
 | **A role granted a shell** | **not contained — waits for containers** |
