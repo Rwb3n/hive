@@ -1,5 +1,12 @@
 # hive
 
+[![tests](https://img.shields.io/badge/tests-91%20passing-brightgreen)](test/)
+[![platforms](https://img.shields.io/badge/verified-Windows%20%2B%20WSL%20Linux-blue)](docs/OPERATIONS.md)
+[![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#requirements)
+[![node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](#requirements)
+[![boundaries](https://img.shields.io/badge/boundaries-filesystem%20%C2%B7%20capability%20%C2%B7%20network%20%C2%B7%20spend-informational)](docs/SECURITY.md)
+[![runtimes](https://img.shields.io/badge/runtimes-tmux%20%7C%20docker-0db7ed?logo=docker&logoColor=white)](docs/ARCHITECTURE.md#runtimes)
+
 A building of scoped Claude Code agents. Each agent is a live `claude` process confined to its
 own room, coordinated through a small HTTP control plane.
 
@@ -32,7 +39,9 @@ audited a claim against fresh test output, found an unverified assertion in this
 docs, and that led to a real symlink-traversal escape being found and fixed
 (`examples/run-1/`, `docs/POSTMORTEMS.md`).
 
-**91 tests** green on Windows and WSL Linux: 29 boundary, 27 budget, 25 egress, 10 config.
+**91 tests** green on Windows and WSL Linux — `node test/all.js`: 29 boundary, 27 budget,
+25 egress, 10 config. Run them on both platforms before trusting a change; two boundary bugs
+were only visible on one of them.
 
 ## Quickstart
 
