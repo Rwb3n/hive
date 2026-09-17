@@ -131,11 +131,97 @@ mid-task without failing) or drop the table. Dead schema is a trap for the next 
 
 **Cost.** An hour to delete; a day to wire up properly.
 
+### 8. Hive memory — retrieval first, an archivist last
+
+**The question.** Should the hive remember things across tasks and sessions? And if so: a memory
+*room*, a memory *agent*, both, or neither?
+
+**Mostly neither, is the answer.** The hive already has a near-complete episodic record: every
+task's brief, result, artifacts and cost; every event, denial and delegation; a goal's durable
+`notes`; per-agent spend; and the full turn-by-turn transcript at `transcript_path`. Storage is
+not the gap. Two other things are:
+
+1. **Nothing reads it back.** An agent starting a task has no access to what an earlier agent
+   learned. Every task begins cold, and two workers under one goal can duplicate each other's
+   reasoning without ever knowing it.
+2. **Nothing distils it.** A thousand task results are a log, not knowledge. "We tried X, it
+   failed because Y" exists only buried in prose nobody re-reads.
+
+So the real question is not *where to store memory* but **how an agent reads the past, and who
+decides what is worth keeping.**
+
+#### Not a memory room
+
+A room is a scope boundary — it answers "what can be reached from here". Memory is not a place an
+agent goes; it is something delivered *to* it. A shared writable memory room would also break the
+property the whole design rests on: every agent writing to one directory is exactly the collision
+that per-agent `workspace/` exists to prevent, and it would need a hole in the guard to work.
+
+The runner already has the right mechanism — it copies inputs into `workspace/input/`. **Memory
+should arrive as an input file**, not as a directory.
+
+#### Not (yet) a memory agent
+
+An archivist maps onto the class system cleanly (`read-only`, `session: persistent`, writes only
+to `outbox/`), and it is the tempting first move. But it costs a turn per distillation, it makes
+"what is worth remembering" an unauditable model judgement, and it has nowhere to put its output
+until the layers below exist.
+
+#### Three layers, earned in order
+
+**8a. Retrieval — no new storage, no agent.** The runner injects relevant prior context into
+`task.json`: the goal's `notes`, the results of sibling tasks under the same goal, and any
+denials this agent hit before. All from tables that already exist. **This is most of the value**
+for none of the risk, and it needs no model in the loop. Depends on item 1 (artifact hand-off),
+which is the same machinery.
+
+*Cost: a day. Do this and stop, unless it proves insufficient.*
+
+**8b. A `facts` table — written by the runner, not a model.** Append-only, structured, derived
+from signals the runner already sees:
+
+```sql
+facts(id, goal_id, task_id, kind, key, value, ts)
+--   kind: approach | outcome | denial | artifact | constraint
+```
+
+Queryable, auditable, costs no tokens, and every row carries `task_id` so any claim is traceable
+to the run that produced it. Provenance is not decoration here — see the warning below.
+
+*Cost: a day, plus deciding the `kind` taxonomy (which is the actual work).*
+
+**8c. An archivist agent — compression, not storage.** Only once 8a and 8b exist. Its job is to
+read a goal's accumulated facts and results and write a short standing brief into `goals.notes` —
+which already survives `hive reset` and is already injected by 8a. Natural triggers: a goal
+closing, or N tasks since the last distillation.
+
+*Cost: half a day once the layers below it are real. It is a new agent class and a task template,
+not new infrastructure.*
+
+#### ⚠️ The failure mode is poisoning, not loss
+
+The risk in hive memory is not forgetting — it is **a wrong fact being injected into every
+subsequent task under a goal, with nobody re-deriving it**. That is strictly worse than no
+memory, and it is the same shape as the safeguard-poisoning problem in `CLI-NOTES.md`: one bad
+turn contaminating everything downstream.
+
+Three consequences for the design, and they are the reason to build this in layers rather than
+all at once:
+
+- **facts carry provenance** — `task_id` on every row, so a claim can be traced and disputed
+- **distillation is additive, never overwriting** — a new standing brief supersedes but does not
+  erase, so a bad one can be rolled back
+- **point a reviewer at memory periodically.** A `read-only` role that cannot edit what it
+  criticises is exactly the right auditor for a fact store, and that class already exists.
+
+And keep the standing rule: *done* means the mechanism produced evidence. For memory that means a
+task visibly acting on injected context, not merely the context being present in `task.json`.
+
 ---
 
 ## Later — real but not yet earned
 
-### 8. Multi-machine
+### 9. Multi-machine
 
 `ARCHITECTURE.md` already puts an HTTP seam in the right place for it, and `CLI-NOTES.md` notes
 `claude gateway --config` exists as a possible aggregation point. Needs per-agent tokens (today
@@ -144,13 +230,13 @@ second host.
 
 **Cost.** A week, and it buys nothing until one machine is genuinely the constraint.
 
-### 9. Egress: containing the allowlisted host
+### 10. Egress: containing the allowlisted host
 
 `SECURITY.md` states the limit plainly: an agent can reach `api.anthropic.com` and could encode
 data into requests there. Containing that means a proxy that inspects and rewrites API traffic —
 a different project, and one with its own failure modes.
 
-### 10. Web view over the event log
+### 11. Web view over the event log
 
 Everything needed is already recorded: `events`, `denials`, `agent_costs`, goals with their
 rollups, task trees with `parent_id`. A read-only page over the DB would make a run legible at a glance in a way `hive ps`
@@ -165,6 +251,9 @@ cannot. Pure convenience — worth doing only once the pipeline above is closed.
   is ever needed, goals are the thing it would nest over and nothing beneath has to change.
 - **Dates, milestones, Gantt.** Agents have queues, not calendars. A goal with a budget and a
   priority is useful; a goal with a schedule is a different product.
+- **A memory room.** Memory is delivered to an agent as an input, not somewhere it goes. A
+  shared writable room would need a hole in the scope guard and would reintroduce the collisions
+  per-agent workspaces prevent. See item 8.
 - **More roles.** `manager` and `boss` exist in the authority table and are ceremony until they
   have something to decide a planner cannot. Adding org-chart depth costs tokens and latency and
   buys nothing; parallelism at the leaves is where the value is.
