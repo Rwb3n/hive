@@ -25,8 +25,21 @@ function parseYaml(text) {
     const parent = stack[stack.length - 1].node;
 
     if (body.startsWith('- ')) {
-      const item = body.slice(2).trim();
+      let item = body.slice(2).trim();
       if (!Array.isArray(parent._list)) parent._list = [];
+      // Strip a trailing comment BEFORE deciding whether this item is a map. A comment
+      // containing ': ' would otherwise turn a plain string into a key/value pair — which
+      // silently dropped 'api.anthropic.com' from the egress allowlist, i.e. removed the
+      // one host agents actually need while looking like it had been configured.
+      const iq = item[0];
+      if (iq === '"' || iq === "'") {
+        // A quoted item is the whole value; anything past the closing quote is a comment.
+        const end = item.indexOf(iq, 1);
+        if (end !== -1) item = item.slice(0, end + 1);
+      } else {
+        const h = item.search(/\s+#/);
+        if (h !== -1) item = item.slice(0, h).trim();
+      }
       if (item.includes(': ')) {
         const obj = {};
         const [k, ...rest] = item.split(': ');
@@ -211,6 +224,15 @@ function provision(planPath, opts = {}) {
         null,
         2
       ) + '\n'
+    );
+  }
+
+  // --- egress-allow.json: the proxy reads this, so the allowlist is configuration.
+  // Each entry is a way out of a room; keep it minimal and justified.
+  if (plan.egress && plan.egress.allow) {
+    fs.writeFileSync(
+      path.join(HIVE_HOME, 'egress-allow.json'),
+      JSON.stringify({ allow: plan.egress.allow }, null, 2) + '\n'
     );
   }
 

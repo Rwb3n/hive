@@ -19,6 +19,26 @@ const IMAGE = process.env.HIVE_AGENT_IMAGE || 'hive/agent:2.1.274';
 
 const docker = (...args) => spawnSync('docker', args, { encoding: 'utf8' });
 
+// Hosts an agent reaches directly, never through the egress proxy: the hive's own
+// services. Derived from the api/otlp endpoints so a custom endpoint cannot be missed.
+function noProxyList(opts = {}) {
+  // Every hive service name, plus whatever the api/otlp URLs actually point at. Twice
+  // this list was wrong by omission — first host.docker.internal, then hive-collector —
+  // and each time the symptom was silent: telemetry refused, cost reading $0.00 while
+  // the caps looked configured. So derive it from the endpoints rather than curating it.
+  const hosts = new Set([
+    'localhost', '127.0.0.1', '::1',
+    'api', 'collector', 'hive-api', 'hive-collector', 'hive-proxy',
+    'host.docker.internal',
+  ]);
+  for (const url of [opts.api, opts.otlp, opts.extraDirect]) {
+    if (!url) continue;
+    try { hosts.add(new URL(url).hostname); } catch (e) { hosts.add(String(url)); }
+  }
+  if (opts.noProxy) for (const h of String(opts.noProxy).split(',')) hosts.add(h.trim());
+  return [...hosts].filter(Boolean).join(',');
+}
+
 function containerName(agent) {
   return `hive-${agent}`;
 }
@@ -87,7 +107,26 @@ function spawn(cfg, opts = {}) {
     '--tmpfs', `${cfg.agent_home || '/home/node'}:rw,nosuid,size=128m`,
     '--security-opt', 'no-new-privileges',
     '--cap-drop', 'ALL',
+    // Network: on an `internal: true` network an agent has NO route out. Its only path
+    // to the world is the egress proxy, which allows a measured allowlist and refuses
+    // everything else (docs/EGRESS.md). Verified against a raw shell: HTTPS, plain HTTP,
+    // DNS and /dev/tcp all fail, while api.anthropic.com still works.
     ...(opts.network ? ['--network', opts.network] : ['--add-host', 'host.docker.internal:host-gateway']),
+    ...(opts.proxy
+      ? [
+          '-e', `HTTPS_PROXY=${opts.proxy}`,
+          '-e', `HTTP_PROXY=${opts.proxy}`,
+          '-e', `https_proxy=${opts.proxy}`,
+          '-e', `http_proxy=${opts.proxy}`,
+          // The hive's own services are inside the network; never proxy those.
+          // NO_PROXY must cover every hive service the agent legitimately talks to.
+          // Missing host.docker.internal here made the proxy refuse the agent's own OTLP
+          // telemetry — cost tracking would have silently read $0.00 in the locked-down
+          // configuration, which is the same class of bug as the collector's db lock.
+          '-e', `NO_PROXY=${noProxyList(opts)}`,
+          '-e', `no_proxy=${noProxyList(opts)}`,
+        ]
+      : []),
     IMAGE,
     'sleep', 'infinity',   // keep the container alive; tasks run via exec
   ];

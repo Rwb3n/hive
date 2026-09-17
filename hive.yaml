@@ -73,3 +73,25 @@ budget:
       agent_usd: 2.00
     worker-2:
       agent_usd: 2.00
+
+# ---------------------------------------------------------------------------
+# Network egress. Containerised agents run on an `internal` docker network with
+# NO route out; their only path to the world is the allowlist proxy.
+#
+# The allowlist was MEASURED, not guessed: a sniffing proxy logged every host a
+# real task contacted while fixing code. Only api.anthropic.com is required.
+#
+# Verified against a raw shell holding a secret: HTTPS POST, plain HTTP, DNS
+# (<secret>.evil.test) and /dev/tcp all failed, while the agent still worked.
+# ---------------------------------------------------------------------------
+egress:
+  enabled: true
+  proxy_port: 3128
+  network: hive-internal      # internal: true — created by `hive net up`
+  allow:
+    - api.anthropic.com       # required: without this an agent cannot think
+    - statsig.anthropic.com   # feature flags; the CLI degrades gracefully without it
+    - '*.sentry.io'           # crash reporting; optional, remove to tighten further
+  # Deliberately NOT allowed: package registries. A worker that must `npm install`
+  # needs its dependencies baked into the image or vendored into its room — opening
+  # registry.npmjs.org is an arbitrary-code-download channel.

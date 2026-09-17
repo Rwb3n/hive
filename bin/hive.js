@@ -161,11 +161,13 @@ cmds.send = (args) => {
   const r = api('POST', '/tasks', { to_agent: to, title, brief });
   if (r.body && r.body.id) return out(`queued ${r.body.id} -> ${to}`);
   if (r.code === 402) {
-    die(`${(r.body && r.body.error) || 'over budget'}
-` +
-        `  raise it:  hive budget set --agent ${to} --agent-usd <n>
-` +
-        `  then:      hive resume ${to}`);
+    die(
+      [
+        (r.body && r.body.error) || 'over budget',
+        `  raise it:  hive budget set --agent ${to} --agent-usd <n>`,
+        `  then:      hive resume ${to}`,
+      ].join('\n')
+    );
   }
   die((r.body && r.body.error) || `http ${r.code}`);
 };
@@ -228,6 +230,103 @@ cmds.cost = () => {
   }
   out(`
 total: $${s.totals.cost_usd}   (from claude_code.cost.usage — the CLI's own figure)`);
+};
+
+// Network egress: an internal docker network with no route out, plus the allowlist
+// proxy as the only bridge. See docs/EGRESS.md.
+cmds.net = (args) => {
+  const sub = args[0] || 'status';
+  const INTERNAL = process.env.HIVE_NET || 'hive-internal';
+  const EGRESS = 'hive-egress';
+  const dk = (...a) => spawnSync('docker', a, { encoding: 'utf8' });
+
+  if (sub === 'up') {
+    if (dk('network', 'inspect', INTERNAL).status !== 0) {
+      const r = dk('network', 'create', '--internal', INTERNAL);
+      if (r.status !== 0) die(`could not create ${INTERNAL}: ${(r.stderr || '').trim()}`);
+      out(`created ${INTERNAL} (internal: no route out)`);
+    } else out(`${INTERNAL} already exists`);
+
+    if (dk('network', 'inspect', EGRESS).status !== 0) {
+      dk('network', 'create', EGRESS);
+      out(`created ${EGRESS} (proxy side, has egress)`);
+    } else out(`${EGRESS} already exists`);
+
+    // The proxy is the ONLY thing on both networks — that is what makes it the only way out.
+    dk('rm', '-f', 'hive-proxy');
+    const allowFile = path.join(HIVE_HOME, 'egress-allow.json');
+    const r = dk('run', '-d', '--name', 'hive-proxy',
+      '--network', INTERNAL,
+      '-v', `${HIVE_HOME}:/hive:ro`,
+      '-v', `${path.join(HIVE_HOME, 'logs')}:/hive/logs`,
+      '-e', 'HIVE_HOME=/hive',
+      '-e', `HIVE_PROXY_PORT=${process.env.HIVE_PROXY_PORT || 3128}`,
+      '--restart', 'unless-stopped',
+      'node:22-bookworm-slim', 'node', '/hive/api/egress-proxy.js');
+    if (r.status !== 0) die(`could not start the proxy: ${(r.stderr || '').trim().slice(0, 300)}`);
+    dk('network', 'connect', EGRESS, 'hive-proxy');
+    out('started hive-proxy (bridges the two networks; the only way out)');
+
+    // The collector must live INSIDE the internal network: an agent there has no route
+    // to the host, so a host-side collector is unreachable and cost silently reads $0.00.
+    dk('rm', '-f', 'hive-collector');
+    const rc = dk('run', '-d', '--name', 'hive-collector',
+      '--network', INTERNAL,
+      '-v', `${HIVE_HOME}:/hive`,
+      '-e', 'HIVE_HOME=/hive',
+      '-e', 'HIVE_OTLP_HOST=0.0.0.0',
+      '-e', 'HIVE_OTLP_PORT=4318',
+      '--restart', 'unless-stopped',
+      'node:22-bookworm-slim', 'node', '/hive/api/collector.js');
+    if (rc.status === 0) out('started hive-collector inside the network (telemetry)');
+    else out(`  WARNING collector did not start: ${(rc.stderr || '').trim().slice(0, 200)}`);
+    if (fs.existsSync(allowFile)) {
+      try {
+        const a = JSON.parse(fs.readFileSync(allowFile, 'utf8'));
+        out(`  allowlist: ${(a.allow || a).join(', ')}`);
+      } catch (e) {}
+    } else {
+      out('  allowlist: built-in defaults (run `hive provision` to write egress-allow.json)');
+    }
+    return;
+  }
+
+  if (sub === 'down') {
+    dk('rm', '-f', 'hive-proxy');
+    dk('rm', '-f', 'hive-collector');
+    dk('network', 'rm', INTERNAL);
+    dk('network', 'rm', EGRESS);
+    return out('proxy stopped, networks removed');
+  }
+
+  if (sub === 'log') {
+    const f = path.join(HIVE_HOME, 'logs', 'egress.jsonl');
+    if (!fs.existsSync(f)) return out('no egress decisions logged yet');
+    const lines = fs.readFileSync(f, 'utf8').trim().split(/\r?\n/).filter(Boolean).slice(-40);
+    for (const l of lines) {
+      try {
+        const j = JSON.parse(l);
+        out(`${j.ts}  ${String(j.evt).toUpperCase().padEnd(8)} ${String(j.agent || '-').padEnd(12)} ${j.host}:${j.port || ''}${j.reason ? ' (' + j.reason + ')' : ''}`);
+      } catch (e) {}
+    }
+    return;
+  }
+
+  // status
+  const inNet = dk('network', 'inspect', INTERNAL).status === 0;
+  const proxyUp = dk('inspect', '-f', '{{.State.Running}}', 'hive-proxy').stdout.trim() === 'true';
+  const collUp = dk('inspect', '-f', '{{.State.Running}}', 'hive-collector').stdout.trim() === 'true';
+  out(`${INTERNAL}: ${inNet ? 'present (internal)' : 'missing'}`);
+  out(`hive-proxy:     ${proxyUp ? 'running' : 'not running'}`);
+  out(`hive-collector: ${collUp ? 'running (inside the network)' : 'not running'}`);
+  const f = path.join(HIVE_HOME, 'egress-allow.json');
+  if (fs.existsSync(f)) {
+    try {
+      const a = JSON.parse(fs.readFileSync(f, 'utf8'));
+      out(`allowlist:      ${(a.allow || a).join(', ')}`);
+    } catch (e) {}
+  }
+  if (!inNet || !proxyUp) out('\nbring it up with: hive net up');
 };
 
 cmds.budget = (args) => {
@@ -332,6 +431,8 @@ cmds.help = () => {
   hive budget set [flags]      --run-usd N | --agent <name> --agent-usd N
                                --task-usd N | --warn-at 0.8 | --on-exceed pause|stop|warn
   hive resume <agent>          un-pause an agent that hit its cap
+  hive net up | down | status  egress: internal network + allowlist proxy
+  hive net log                 every egress decision (allowed / refused)
   hive reset                   wipe tasks + events
 
 env: HIVE_HOME=${HIVE_HOME}  HIVE_API=${API}  HIVE_TOKEN=${TOKEN ? 'set' : 'unset'}`);

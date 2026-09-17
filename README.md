@@ -27,13 +27,15 @@ hive/
   docker/                agent image + compose stack (api, collector, dashboards)
   templates/             role settings, generated into each agent's .claude/
     budget.js            caps: enforced at claim time, so nothing bypasses them
-  test/                  56 tests (boundary + budget), green on Windows and Linux
+    egress-proxy.js      network allowlist — the only route out of a room
+  test/                  91 tests (boundary, budget, egress, config), both platforms
   docs/
     CONFIG.md            everything in hive.yaml: rooms, roles, authority, budget
     FINDINGS.md          verified CLI behaviour — read before changing anything
     RUNTIME.md           how to launch an agent unattended, every trap documented
     CONTAINERS.md        the kernel-enforced boundary; what it does and does not cover
     TELEMETRY.md         cost/token accounting straight from the CLI
+    EGRESS.md            network containment: measured allowlist, verified closed
   examples/run-1/        a real three-agent run: tasks, events, denials, output
 ```
 
@@ -109,7 +111,7 @@ runner turns those into tasks, and the API still checks the policy. Workers cann
 | Audit log | written outside the room; the agent cannot edit it |
 | **A role granted a shell (tmux runtime)** | **not contained — use the docker runtime** |
 | A role granted a shell (docker runtime) | contained: host FS unreachable, verified |
-| Network egress from a container | **not restricted** — see `docs/CONTAINERS.md` |
+| Network egress from a container | allowlist only; verified against a raw shell |
 | Spend past a cap | refused at claim (402); agent paused, audited |
 
 The tool boundary (`permissions.deny`) is the stronger half of the tmux runtime: it removes
@@ -156,6 +158,26 @@ Verified live: a worker with a $0.06 cap did one real task ($0.0973), **paused i
 seconds later** with the fix commands in its own log, refused the next task at the door, and
 — once the cap was raised and it was resumed — recovered without a restart. Details and how
 to size a cap: `docs/CONFIG.md`.
+
+## Network
+
+Containerised agents sit on an `internal` docker network with **no route out**. Their only
+path is an allowlist proxy, and the allowlist was measured by logging what a real task
+actually contacted — it comes to one host:
+
+```yaml
+egress:
+  allow:
+    - api.anthropic.com      # required: without this an agent cannot think
+```
+
+```
+hive net up | status | log | down
+```
+
+Red-teamed with a raw shell holding a secret: HTTPS, plain HTTP, raw TCP to a bare IP,
+proxy-env-stripped requests and DNS exfiltration all failed, while the agent kept working.
+Package registries are deliberately not allowed. Details: `docs/EGRESS.md`.
 
 ## Before you change anything
 
