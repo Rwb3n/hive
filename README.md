@@ -1,10 +1,6 @@
 # hive
 
-<!-- The live CI badge renders blank while this repo is private — shields.io cannot reach
-     a private Actions API. Swap the static badge below for this line when going public:
 [![tests](https://github.com/Rwb3n/hive/actions/workflows/tests.yml/badge.svg)](https://github.com/Rwb3n/hive/actions/workflows/tests.yml)
--->
-[![tests](https://img.shields.io/badge/tests-91%20passing-brightgreen)](.github/workflows/tests.yml)
 [![platforms](https://img.shields.io/badge/verified-Windows%20%2B%20WSL%20Linux-blue)](docs/OPERATIONS.md)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#requirements)
 [![node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](#requirements)
